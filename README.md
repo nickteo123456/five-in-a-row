@@ -13,17 +13,6 @@ Open [http://localhost:3000](http://localhost:3000)
 
 ## User Accounts
 
-### Teacher Account
-- **Email:** `iamnick0925@gmail.com`
-- **Password:** `20040925nick`
-- **Role:** Teacher (full dashboard access)
-
-### Student Accounts
-- Register with any email and password (6+ characters)
-- Automatically assigned student role
-- Access to game features
-
-
 
 ## Tech Stack
 
