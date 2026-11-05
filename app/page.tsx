@@ -1,20 +1,20 @@
-"use client";
+'use client'
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { GameDashboard } from "@/components/game-dashboard";
-import { useAuth } from "@/components/auth-provider";
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import { GameDashboard } from '@/components/game-dashboard'
+import { useAuth } from '@/components/auth-provider'
 
 export default function Home() {
-  const router = useRouter();
-  const { user, loading } = useAuth();
+  const router = useRouter()
+  const { user, loading } = useAuth()
 
   useEffect(() => {
     if (!loading && !user) {
-      router.push("/login");
-      return;
+      router.push('/login')
+      return
     }
-  }, [user, loading, router]);
+  }, [user, loading, router])
 
   if (loading) {
     return (
@@ -24,16 +24,16 @@ export default function Home() {
           <p className="text-muted-foreground">Loading...</p>
         </div>
       </div>
-    );
+    )
   }
 
   if (!user) {
-    return null;
+    return null
   }
 
   return (
     <main className="min-h-screen bg-background">
       <GameDashboard />
     </main>
-  );
+  )
 }

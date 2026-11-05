@@ -1,1045 +1,782 @@
-"use client"
+'use client'
 
-import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from "react"
-import { toast } from "sonner"
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
+import { toast } from 'sonner'
+import { useAuth } from './auth-provider'
+import { useI18n } from './i18n-provider'
+import { useQuestionBank } from '@/hooks/use-question-bank'
+import { chooseComputerMove } from '@/lib/game/ai'
+import {
+  createEmptyBoard,
+  findWinningLine,
+  isBoardFull,
+  nextPiece,
+  placeOnBoard,
+} from '@/lib/game/board'
+import { advanceQueue, filterQuestions, retryMissedQuestion, shuffle } from '@/lib/game/questions'
+import { isCorrectAnswer, pointsForDifficulty } from '@/lib/game/scoring'
+import { addToTally, applyLobby, createInitialState, createPlayer } from '@/lib/game/state'
+import { logger } from '@/lib/logger'
+import { playSound } from '@/lib/sound'
+import type {
+  Answer,
+  CellPosition,
+  GameSetup,
+  GameState,
+  LobbySnapshot,
+  Piece,
+  Player,
+  Question,
+} from '@/types/game'
 
-interface Player {
-  id: string
-  name: string
-  score: number
-  avatar: string
-  isOnline: boolean
-  piece: "X" | "O"
-}
-
-type BoardCell = "X" | "O" | null
-
-type BoardMode = "digital" | "physical"
-
-interface GameState {
-  currentPlayer: Player | null
-  players: Player[]
-  gameMode: "single" | "multiplayer" | "online"
-  currentQuestion: Question | null
-  gameSession: string | null
-  isGameActive: boolean
-  board: BoardCell[][]
-  currentTurn: "X" | "O"
-  canPlacePiece: boolean
-  winner: Player | null
-  isGameOver: boolean
-  lobbyId: string | null
-  lobbyCode: string | null
-  isHost: boolean
-  pendingTurnSwitch: boolean // Track if we need to switch turn after user clicks Continue
-  boardMode: BoardMode
-}
-
-interface Question {
-  id: string
-  type: "multiple-choice" | "code-completion" | "true-false"
-  question: string
-  code?: string
-  options?: string[]
-  correctAnswer: string | number
-  explanation: string
-  difficulty: "beginner" | "intermediate" | "advanced"
-  topic: string
-}
+const POLL_INTERVAL_MS = 1500
+const COMPUTER_DELAY_MS = 700
+const ACTIVE_LOBBY_KEY = 'activeLobbyCode'
+const LOCAL_TIME_LIMIT_SECONDS = 60
+const ONLINE_TIME_LIMIT_SECONDS = 90
 
 interface GameContextType {
   gameState: GameState
-  joinGame: (
-    playerName: string,
-    gameMode: "single" | "multiplayer" | "online",
-    player2Name?: string,
-    boardMode?: BoardMode
-  ) => void
-  scanQRCode: (qrData: string) => void
-  answerQuestion: (answer: string | number) => boolean
-  nextQuestion: () => void
-  updateScore: (playerId: string, points: number) => void
-  leaveGame: () => void
-  placePiece: (row: number, col: number) => boolean
-  resetBoard: () => void
-  addSecondPlayer: (playerName: string) => void
-  createLobby: (userId: string, userName: string) => Promise<{lobbyCode: string, lobbyId: string} | null>
-  joinLobby: (lobbyCode: string, userId: string, userName: string) => Promise<boolean>
-  syncLobbyState: (lobbyId?: string) => Promise<void>
+  questions: Question[]
+  joinGame: (setup: GameSetup) => void
+  answerQuestion: (answer: Answer) => Promise<boolean>
+  placePiece: (row: number, col: number) => Promise<boolean>
   handleContinueAfterWrongAnswer: () => void
   completePhysicalPlacement: () => void
+  resetBoard: () => Promise<void>
+  leaveGame: () => Promise<void>
+  createLobby: () => Promise<{ lobbyCode: string; lobbyId: string } | null>
+  joinLobby: (lobbyCode: string) => Promise<boolean>
+  startOnlineGame: () => Promise<boolean>
+  resumeOnlineGame: () => Promise<void>
+  requestRematch: () => Promise<void>
+  cancelRematch: () => Promise<void>
+  acceptRematch: () => Promise<void>
+  declineRematch: () => Promise<void>
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined)
 
-// Transform database question to game question format
-function transformDbQuestionToGameQuestion(dbQuestion: any): Question {
-  const options = [
-    dbQuestion.option_a,
-    dbQuestion.option_b,
-    dbQuestion.option_c,
-    dbQuestion.option_d,
-  ];
+async function patchLobby(lobbyId: string, updates: Record<string, unknown>): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/lobby/${lobbyId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    })
 
-  return {
-    id: dbQuestion.id || Math.random().toString(36).substr(2, 9),
-    type: "multiple-choice",
-    question: dbQuestion.question,
-    options,
-    correctAnswer: dbQuestion.correct_answer,
-    explanation: dbQuestion.explanation,
-    difficulty: dbQuestion.difficulty || "beginner",
-    topic: dbQuestion.topic || "Python",
-  };
-}
-
-// Fallback questions in case database fetch fails
-const fallbackQuestions: Question[] = [
-  {
-    id: "1",
-    type: "multiple-choice",
-    question: "Which keyword is used to define a function in Python?",
-    options: ["function", "def", "define", "func"],
-    correctAnswer: 1,
-    explanation: 'The "def" keyword is used to define functions in Python.',
-    difficulty: "beginner",
-    topic: "Function Definition",
-  },
-  {
-    id: "2",
-    type: "code-completion",
-    question: "Complete this function to return the sum of two numbers:",
-    code: "def add_numbers(a, b):\n    # Complete this function\n    ____",
-    correctAnswer: "return a + b",
-    explanation: "Functions use the return statement to send back a value to the caller.",
-    difficulty: "beginner",
-    topic: "Return Values",
-  },
-  {
-    id: "3",
-    type: "multiple-choice",
-    question: "What will this function return?\n\ndef mystery_func(x=5):\n    return x * 2\n\nresult = mystery_func()",
-    options: ["5", "10", "0", "Error"],
-    correctAnswer: 1,
-    explanation: "The function uses a default parameter value of 5, so mystery_func() returns 5 * 2 = 10.",
-    difficulty: "intermediate",
-    topic: "Default Parameters",
-  },
-  {
-    id: "4",
-    type: "true-false",
-    question: "Variables defined inside a function are accessible from outside the function.",
-    correctAnswer: 0,
-    explanation: "Variables defined inside a function have local scope and are not accessible outside the function.",
-    difficulty: "intermediate",
-    topic: "Function Scope",
-  },
-  {
-    id: "5",
-    type: "multiple-choice",
-    question: "Which built-in function returns the length of a list?",
-    options: ["size()", "length()", "len()", "count()"],
-    correctAnswer: 2,
-    explanation: "The len() function returns the number of items in a sequence or collection.",
-    difficulty: "beginner",
-    topic: "Built-in Functions",
-  },
-]
-
-export function GameProvider({ children }: { children: ReactNode }) {
-  const createEmptyBoard = (): BoardCell[][] => {
-    return Array(15)
-      .fill(null)
-      .map(() => Array(15).fill(null))
-  }
-
-  const [gameState, setGameState] = useState<GameState>({
-    currentPlayer: null,
-    players: [],
-    gameMode: "single",
-    currentQuestion: null,
-    gameSession: null,
-    isGameActive: false,
-    board: createEmptyBoard(),
-    currentTurn: "X",
-    canPlacePiece: false,
-    winner: null,
-    isGameOver: false,
-    lobbyId: null,
-    lobbyCode: null,
-    isHost: false,
-    pendingTurnSwitch: false,
-    boardMode: "digital",
-  })
-
-  const [questionIndex, setQuestionIndex] = useState(0)
-  const [questions, setQuestions] = useState<Question[]>([])
-  const [questionsLoaded, setQuestionsLoaded] = useState(false)
-  const [usedQuestionIds, setUsedQuestionIds] = useState<Set<string>>(new Set())
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
-
-  // Fetch questions from database
-  useEffect(() => {
-    const fetchQuestions = async () => {
-      try {
-        // Fetch random questions from database (get 50 questions)
-        const response = await fetch('/api/questions?random=true&count=50')
-        if (response.ok) {
-          const data = await response.json()
-          if (data.questions && data.questions.length > 0) {
-            const transformedQuestions = data.questions.map(transformDbQuestionToGameQuestion)
-            setQuestions(transformedQuestions)
-            setQuestionsLoaded(true)
-            console.log(`Loaded ${transformedQuestions.length} questions from database`)
-          } else {
-            // No questions in database, use fallback
-            console.warn('No questions found in database, using fallback questions')
-            setQuestions(fallbackQuestions)
-            setQuestionsLoaded(true)
-          }
-        } else {
-          // API error, use fallback
-          console.warn('Failed to fetch questions from API, using fallback questions')
-          setQuestions(fallbackQuestions)
-          setQuestionsLoaded(true)
-        }
-      } catch (error) {
-        // Network error, use fallback
-        console.error('Error fetching questions:', error)
-        setQuestions(fallbackQuestions)
-        setQuestionsLoaded(true)
-      }
-    }
-
-    fetchQuestions()
-  }, [])
-
-  const joinGame = (
-    playerName: string,
-    gameMode: "single" | "multiplayer",
-    player2Name?: string,
-    boardMode: BoardMode = "digital",
-  ) => {
-    const player1: Player = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: playerName,
-      score: 0,
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${playerName}`,
-      isOnline: true,
-      piece: "X",
-    }
-
-    const players = [player1]
-    
-    // If local multiplayer mode, create player 2
-    if (gameMode === "multiplayer" && player2Name) {
-      const player2: Player = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: player2Name,
-        score: 0,
-        avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${player2Name}`,
-        isOnline: true,
-        piece: "O",
-      }
-      players.push(player2)
-    }
-
-    setGameState((prev) => ({
-      ...prev,
-      currentPlayer: player1, // Player 1 starts first
-      players,
-      gameMode,
-      gameSession: Math.random().toString(36).substr(2, 9),
-      isGameActive: true,
-      currentQuestion: questions.length > 0 ? questions[0] : null,
-      board: createEmptyBoard(),
-      currentTurn: "X",
-      canPlacePiece: false,
-      winner: null,
-      isGameOver: false,
-      pendingTurnSwitch: false,
-      boardMode,
-    }))
-    setQuestionIndex(0)
-    // Mark first question as used
-    if (questions.length > 0) {
-      setUsedQuestionIds(new Set([questions[0].id]))
-    }
-  }
-
-  const addSecondPlayer = (playerName: string) => {
-    const newPlayer: Player = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: playerName,
-      score: 0,
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${playerName}`,
-      isOnline: true,
-      piece: "O",
-    }
-
-    setGameState((prev) => ({
-      ...prev,
-      players: [...prev.players, newPlayer],
-      gameMode: "multiplayer",
-    }))
-  }
-
-  const scanQRCode = (qrData: string) => {
-    try {
-      const data = JSON.parse(qrData)
-      if (data.type === "question" && data.questionId) {
-        const question = questions.find((q) => q.id === data.questionId)
-        if (question) {
-          setGameState((prev) => ({ ...prev, currentQuestion: question }))
-        }
-      } else if (data.type === "bonus") {
-        if (gameState.currentPlayer) {
-          updateScore(gameState.currentPlayer.id, data.points || 10)
-        }
-      }
-    } catch {
-      if (questions.length > 0) {
-        const randomQuestion = questions[Math.floor(Math.random() * questions.length)]
-        setGameState((prev) => ({ ...prev, currentQuestion: randomQuestion }))
-      }
-    }
-  }
-
-  const answerQuestion = async (answer: string | number): Promise<boolean> => {
-    if (!gameState.currentQuestion || !gameState.currentPlayer) return false
-
-    const isCorrect = gameState.currentQuestion.correctAnswer === answer
-
-    if (isCorrect) {
-      const points =
-        gameState.currentQuestion.difficulty === "beginner"
-          ? 10
-          : gameState.currentQuestion.difficulty === "intermediate"
-            ? 15
-            : 20
-      updateScore(gameState.currentPlayer.id, points)
-      setGameState((prev) => ({
-        ...prev,
-        canPlacePiece: true,
-      }))
-
-      // Sync with server in online mode
-      if (gameState.gameMode === "online" && gameState.lobbyId) {
-        const updatedPlayer = gameState.players.find(p => p.id === gameState.currentPlayer?.id)
-        const newScore = (updatedPlayer?.score || 0) + points
-
-        try {
-          await fetch(`/api/lobby/${gameState.lobbyId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              [gameState.isHost ? 'host_score' : 'guest_score']: newScore,
-              [gameState.isHost ? 'host_can_place' : 'guest_can_place']: true,
-            }),
-          })
-        } catch (error) {
-          console.error('Error syncing answer to server:', error)
-        }
-      }
-    } else {
-      // Wrong answer - mark that we need to switch turn after user clicks Continue
-      if ((gameState.gameMode === "multiplayer" || gameState.gameMode === "online") && gameState.players.length === 2) {
-        setGameState((prev) => ({
-          ...prev,
-          pendingTurnSwitch: true,
-        }))
-      }
-    }
-
-    return isCorrect
-  }
-
-  const checkWinner = (board: BoardCell[][], row: number, col: number, piece: "X" | "O"): boolean => {
-    const directions = [
-      [0, 1], // horizontal
-      [1, 0], // vertical
-      [1, 1], // diagonal \
-      [1, -1], // diagonal /
-    ]
-
-    for (const [dx, dy] of directions) {
-      let count = 1
-
-      // Check positive direction
-      for (let i = 1; i < 5; i++) {
-        const newRow = row + dx * i
-        const newCol = col + dy * i
-        if (newRow >= 0 && newRow < 15 && newCol >= 0 && newCol < 15 && board[newRow][newCol] === piece) {
-          count++
-        } else {
-          break
-        }
-      }
-
-      // Check negative direction
-      for (let i = 1; i < 5; i++) {
-        const newRow = row - dx * i
-        const newCol = col - dy * i
-        if (newRow >= 0 && newRow < 15 && newCol >= 0 && newCol < 15 && board[newRow][newCol] === piece) {
-          count++
-        } else {
-          break
-        }
-      }
-
-      if (count >= 5) return true
-    }
-
+    return response.ok
+  } catch (error) {
+    logger.error('Error updating lobby:', error)
     return false
   }
+}
 
-  const placePiece = async (row: number, col: number): Promise<boolean> => {
-    if (gameState.boardMode === "physical") {
-      return false
-    }
-
-    if (!gameState.canPlacePiece || gameState.isGameOver) return false
-    if (gameState.board[row][col] !== null) return false
-
-    const newBoard = gameState.board.map((r) => [...r])
-    newBoard[row][col] = gameState.currentTurn
-
-    const hasWon = checkWinner(newBoard, row, col, gameState.currentTurn)
-    const currentWinner = hasWon ? gameState.players.find((p) => p.piece === gameState.currentTurn) || null : null
-
-    setGameState((prev) => ({
-      ...prev,
-      board: newBoard,
-      canPlacePiece: false,
-      currentTurn: prev.currentTurn === "X" ? "O" : "X",
-      winner: currentWinner,
-      isGameOver: hasWon,
-      isGameActive: !hasWon, // End the game when someone wins
-      currentPlayer:
-        prev.gameMode === "multiplayer" || prev.gameMode === "online"
-          ? prev.players.find((p) => p.piece === (prev.currentTurn === "X" ? "O" : "X")) || prev.currentPlayer
-          : prev.currentPlayer,
-    }))
-
-    // Sync with server in online mode
-    if (gameState.gameMode === "online" && gameState.lobbyId) {
-      try {
-        const updateData: any = {
-          board_state: newBoard,
-          current_turn: gameState.currentTurn === "X" ? "O" : "X",
-          // After placing, both players need to answer before placing again
-          host_can_place: false,
-          guest_can_place: false,
-        }
-
-        if (hasWon) {
-          updateData.status = 'completed'
-          updateData.winner_id = currentWinner?.id
-        } else {
-          updateData.current_question_index = questions.length > 0 ? (questionIndex + 1) % questions.length : 0
-        }
-
-        await fetch(`/api/lobby/${gameState.lobbyId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(updateData),
-        })
-      } catch (error) {
-        console.error('Error syncing piece placement to server:', error)
-      }
-    }
-
-    if (!hasWon) {
-      nextQuestion()
-    } else {
-      // Save stats and match history to database when game ends
-      try {
-        const loser = gameState.players.find(p => p.id !== currentWinner?.id)
-        
-        // Update stats for winner
-        if (currentWinner) {
-          await fetch('/api/student/update-stats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: currentWinner.id,
-              score: currentWinner.score,
-              isWin: true,
-            }),
-          })
-          
-          // Save match history for winner
-          await fetch('/api/match-history/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: currentWinner.id,
-              score: currentWinner.score,
-              gameMode: gameState.gameMode,
-              opponentName: loser?.name || 'Unknown',
-              opponentScore: loser?.score || 0,
-              isWinner: true,
-              duration: 0, // Can track this later
-            }),
-          })
-        }
-        
-        // Update stats for loser
-        if (loser) {
-          await fetch('/api/student/update-stats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: loser.id,
-              score: loser.score,
-              isWin: false,
-            }),
-          })
-          
-          // Save match history for loser
-          await fetch('/api/match-history/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userId: loser.id,
-              score: loser.score,
-              gameMode: gameState.gameMode,
-              opponentName: currentWinner?.name || 'Unknown',
-              opponentScore: currentWinner?.score || 0,
-              isWinner: false,
-              duration: 0,
-            }),
-          })
-        }
-      } catch (error) {
-        console.error('Error updating player stats and match history:', error)
-      }
-    }
-
-    return true
+function rememberLobby(lobbyCode: string | null) {
+  try {
+    if (lobbyCode) localStorage.setItem(ACTIVE_LOBBY_KEY, lobbyCode)
+    else localStorage.removeItem(ACTIVE_LOBBY_KEY)
+  } catch {
+    // Storage can be unavailable, for example in private browsing
   }
+}
 
-  const resetBoard = async () => {
-    // For online games, reset the lobby state on the server
-    if (gameState.gameMode === "online" && gameState.lobbyId) {
-      try {
-        await fetch(`/api/lobby/${gameState.lobbyId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            board_state: createEmptyBoard(),
-            current_turn: 'X',
-            host_can_place: false,
-            guest_can_place: false,
-            winner_id: null,
-            status: 'active',
-            host_score: 0,
-            guest_score: 0,
-            current_question_index: 0,
-          }),
-        })
-      } catch (error) {
-        console.error('Error resetting lobby on server:', error)
-        toast.error('Failed to reset game')
-        return
-      }
-    }
-
-    // Reset local state
-    setGameState((prev) => ({
-      ...prev,
-      board: createEmptyBoard(),
-      currentTurn: "X",
-      canPlacePiece: false,
-      winner: null,
-      isGameOver: false,
-      isGameActive: true, // Reactivate the game
-      currentPlayer: prev.players[0],
-      players: prev.players.map(p => ({ ...p, score: 0 })), // Reset scores
-      pendingTurnSwitch: false,
-      boardMode: prev.boardMode,
-    }))
-    setQuestionIndex(0)
-    // Reset used questions and mark first question as used
-    if (questions.length > 0) {
-      setUsedQuestionIds(new Set([questions[0].id]))
-    }
-    setGameState((prev) => ({
-      ...prev,
-      currentQuestion: questions.length > 0 ? questions[0] : null,
-    }))
+function recallLobby(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_LOBBY_KEY)
+  } catch {
+    return null
   }
+}
 
-  const handleContinueAfterWrongAnswer = async () => {
-    // Only switch turn if there's a pending turn switch (from wrong answer)
-    if (!gameState.pendingTurnSwitch) {
-      return
+export function GameProvider({ children }: { children: ReactNode }) {
+  const { user, isGuest } = useAuth()
+  const userId = user?.id
+  const { t, translateError } = useI18n()
+  const questions = useQuestionBank()
+  const [gameState, setGameState] = useState<GameState>(createInitialState)
+
+  // Timers and polling outlive a render, so they read the latest values from refs
+  const stateRef = useRef(gameState)
+  const questionsRef = useRef(questions)
+  const queueRef = useRef<Question[]>([])
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const computerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lobbyIndexRef = useRef<number | null>(null)
+
+  const updateState = useCallback((update: (state: GameState) => GameState) => {
+    stateRef.current = update(stateRef.current)
+    setGameState(stateRef.current)
+  }, [])
+
+  useEffect(() => {
+    questionsRef.current = questions
+  }, [questions])
+
+  const onlineQuestion = useCallback((index: number | null) => {
+    // Both players sort the same way, so an index means the same question
+    const ordered = [...questionsRef.current].sort((a, b) => a.id.localeCompare(b.id))
+    return ordered.length > 0 ? ordered[(index ?? 0) % ordered.length] : null
+  }, [])
+
+  const takeNextQuestion = useCallback(() => {
+    const { question, queue } = advanceQueue(queueRef.current)
+    queueRef.current = queue
+    return question
+  }, [])
+
+  const stopPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current)
+      pollingRef.current = null
     }
+  }, [])
 
-    const nextPlayer = gameState.players.find(p => p.id !== gameState.currentPlayer?.id)
-    const nextTurn = nextPlayer?.piece || gameState.currentTurn
-    
-    setGameState((prev) => ({
-      ...prev,
-      currentPlayer: nextPlayer || prev.currentPlayer,
-      currentTurn: nextTurn,
-      canPlacePiece: false,
-      pendingTurnSwitch: false,
-    }))
-
-    // Sync with server in online mode
-    if (gameState.gameMode === "online" && gameState.lobbyId) {
-      try {
-        await fetch(`/api/lobby/${gameState.lobbyId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            current_turn: nextTurn,
-            current_question_index: questions.length > 0 ? (questionIndex + 1) % questions.length : 0,
-          }),
-        })
-      } catch (error) {
-        console.error('Error syncing turn switch to server:', error)
-      }
+  const clearComputerTimer = useCallback(() => {
+    if (computerTimerRef.current) {
+      clearTimeout(computerTimerRef.current)
+      computerTimerRef.current = null
     }
-    
-    // Get next question for the new player
-    nextQuestion()
-  }
+  }, [])
 
-  const completePhysicalPlacement = () => {
-    if (gameState.boardMode !== "physical" || !gameState.canPlacePiece) {
-      return
-    }
+  const recordAttempt = useCallback(
+    (question: Question, answer: Answer) => {
+      const { gameMode } = stateRef.current
+      const isLoggedIn = user && !isGuest
 
-    setGameState((prev) => {
-      const nextTurn = prev.currentTurn === "X" ? "O" : "X"
-      const nextPlayer = prev.players.find((p) => p.piece === nextTurn) || prev.currentPlayer
+      // A shared device can't say which student answered in local multiplayer
+      if (!isLoggedIn || gameMode === 'multiplayer' || question.id.startsWith('fallback-')) return
 
-      return {
-        ...prev,
-        currentTurn: nextTurn,
-        currentPlayer: nextPlayer || prev.currentPlayer,
-        canPlacePiece: false,
-        pendingTurnSwitch: false,
-      }
-    })
-
-    nextQuestion()
-  }
-
-  const nextQuestion = () => {
-    if (questions.length === 0) return
-    
-    // Find next unused question
-    let nextQuestion: Question | null = null
-    let attempts = 0
-    const maxAttempts = questions.length
-    
-    // If all questions have been used, reset the used set
-    if (usedQuestionIds.size >= questions.length) {
-      setUsedQuestionIds(new Set())
-    }
-    
-    // Find an unused question
-    while (attempts < maxAttempts) {
-      const candidateIndex = (questionIndex + 1 + attempts) % questions.length
-      const candidate = questions[candidateIndex]
-      
-      if (!usedQuestionIds.has(candidate.id)) {
-        nextQuestion = candidate
-        setQuestionIndex(candidateIndex)
-        setUsedQuestionIds(prev => new Set(prev).add(candidate.id))
-        break
-      }
-      
-      attempts++
-    }
-    
-    // Fallback: if we somehow can't find an unused question, just use the next one
-    if (!nextQuestion) {
-      const fallbackIndex = (questionIndex + 1) % questions.length
-      nextQuestion = questions[fallbackIndex]
-      setQuestionIndex(fallbackIndex)
-    }
-    
-    setGameState((prev) => ({
-      ...prev,
-      currentQuestion: nextQuestion,
-    }))
-  }
-
-  const updateScore = (playerId: string, points: number) => {
-    setGameState((prev) => ({
-      ...prev,
-      players: prev.players.map((player) =>
-        player.id === playerId ? { ...player, score: player.score + points } : player,
-      ),
-      currentPlayer:
-        prev.currentPlayer?.id === playerId
-          ? { ...prev.currentPlayer, score: prev.currentPlayer.score + points }
-          : prev.currentPlayer,
-    }))
-  }
-
-  const leaveGame = async () => {
-    // If in online mode, notify server
-    if (gameState.lobbyId && gameState.currentPlayer) {
-      try {
-        await fetch(`/api/lobby/${gameState.lobbyId}`, {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: gameState.currentPlayer.id }),
-        })
-      } catch (error) {
-        console.error('Error leaving lobby:', error)
-      }
-    }
-
-    // Clear polling interval
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current)
-      pollingIntervalRef.current = null
-    }
-
-    setGameState({
-      currentPlayer: null,
-      players: [],
-      gameMode: "single",
-      currentQuestion: null,
-      gameSession: null,
-      isGameActive: false,
-      board: createEmptyBoard(),
-      currentTurn: "X",
-      canPlacePiece: false,
-      winner: null,
-      isGameOver: false,
-      lobbyId: null,
-      lobbyCode: null,
-      isHost: false,
-      pendingTurnSwitch: false,
-      boardMode: "digital",
-    })
-    setQuestionIndex(0)
-    setUsedQuestionIds(new Set()) // Clear used questions when leaving game
-  }
-
-  const createLobby = async (userId: string, userName: string): Promise<{lobbyCode: string, lobbyId: string} | null> => {
-    try {
-      const response = await fetch('/api/lobby/create', {
+      fetch('/api/quiz/attempts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, userName }),
+        body: JSON.stringify({ questionId: question.id, answer }),
+      }).catch((error) => logger.error('Error saving attempt:', error))
+    },
+    [user, isGuest]
+  )
+
+  const finishMove = useCallback(
+    (state: GameState, move: CellPosition, piece: Piece): GameState => {
+      const board = placeOnBoard(state.board, move, piece)
+      const winningLine = findWinningLine(board, move, piece)
+      const isDraw = !winningLine && isBoardFull(board)
+      const turn = nextPiece(piece)
+      const winner = winningLine
+        ? state.players.find((player) => player.piece === piece) || null
+        : null
+
+      return {
+        ...state,
+        board,
+        lastMove: move,
+        winningLine,
+        winner,
+        isDraw,
+        isGameOver: Boolean(winningLine) || isDraw,
+        isGameActive: !winningLine && !isDraw,
+        canPlacePiece: false,
+        currentTurn: turn,
+        currentPlayer: state.players.find((player) => player.piece === turn) || state.currentPlayer,
+      }
+    },
+    []
+  )
+
+  const playComputerTurn = useCallback(() => {
+    updateState((state) => ({ ...state, isComputerThinking: true }))
+
+    computerTimerRef.current = setTimeout(() => {
+      updateState((state) => {
+        const computer = state.players.find((player) => player.isComputer)
+        const move = computer && chooseComputerMove(state.board, computer.piece)
+        if (!computer || !move) return { ...state, isComputerThinking: false }
+
+        const next = finishMove({ ...state, isComputerThinking: false }, move, computer.piece)
+        return next.isGameOver ? next : { ...next, currentQuestion: takeNextQuestion() }
       })
 
-      if (!response.ok) {
-        const error = await response.json()
-        toast.error('Failed to create lobby', {
-          description: error.error || 'Please try again',
+      const { winner, winningLine } = stateRef.current
+      playSound(winningLine ? (winner?.isComputer ? 'lose' : 'win') : 'place')
+    }, COMPUTER_DELAY_MS)
+  }, [finishMove, takeNextQuestion, updateState])
+
+  const joinGame = useCallback(
+    ({ mode, boardMode = 'digital', player1Name, player2Name, filter, isTimed }: GameSetup) => {
+      const players: Player[] = [createPlayer(crypto.randomUUID(), player1Name, 'X')]
+
+      if (mode === 'multiplayer' && player2Name) {
+        players.push(createPlayer(crypto.randomUUID(), player2Name, 'O'))
+      }
+
+      if (mode === 'single') {
+        players.push({
+          ...createPlayer('computer', t('game.computer'), 'O'),
+          isComputer: true,
         })
+      }
+
+      queueRef.current = shuffle(filterQuestions(questionsRef.current, filter))
+
+      updateState(() => ({
+        ...createInitialState(),
+        currentPlayer: players[0],
+        players,
+        gameMode: mode,
+        isGameActive: true,
+        boardMode,
+        questionTimeLimit: isTimed ? LOCAL_TIME_LIMIT_SECONDS : null,
+        currentQuestion: takeNextQuestion(),
+      }))
+    },
+    [t, takeNextQuestion, updateState]
+  )
+
+  const answerQuestion = useCallback(
+    async (answer: Answer): Promise<boolean> => {
+      const { currentQuestion: question, currentPlayer: player, gameMode } = stateRef.current
+      if (!question || !player) return false
+
+      const isCorrect = isCorrectAnswer(question, answer)
+      const points = isCorrect ? pointsForDifficulty(question.difficulty) : 0
+
+      recordAttempt(question, answer)
+      playSound(isCorrect ? 'correct' : 'wrong')
+
+      if (!isCorrect && gameMode !== 'online') {
+        queueRef.current = retryMissedQuestion(queueRef.current, question)
+      }
+
+      updateState((state) => ({
+        ...state,
+        players: state.players.map((candidate) =>
+          candidate.id === player.id ? { ...candidate, score: candidate.score + points } : candidate
+        ),
+        currentPlayer: { ...player, score: player.score + points },
+        canPlacePiece: isCorrect,
+        pendingTurnSwitch: !isCorrect,
+        tallies: { ...state.tallies, [player.id]: addToTally(state.tallies[player.id], isCorrect) },
+        missedQuestions: isCorrect
+          ? state.missedQuestions
+          : [...state.missedQuestions, { playerId: player.id, question }],
+      }))
+
+      const { lobbyId, isHost, tallies } = stateRef.current
+
+      if (gameMode === 'online' && lobbyId) {
+        const side = isHost ? 'host' : 'guest'
+
+        await patchLobby(lobbyId, {
+          [`${side}_score`]: player.score + points,
+          [`${side}_can_place`]: isCorrect,
+          [`${side}_answered`]: tallies[player.id].answered,
+          [`${side}_correct`]: tallies[player.id].correct,
+        })
+      }
+
+      return isCorrect
+    },
+    [recordAttempt, updateState]
+  )
+
+  const placePiece = useCallback(
+    async (row: number, col: number): Promise<boolean> => {
+      const before = stateRef.current
+
+      if (before.boardMode === 'physical' || !before.canPlacePiece || before.isGameOver) {
+        return false
+      }
+      if (before.board[row][col] !== null) return false
+
+      updateState((state) => finishMove(state, { row, col }, state.currentTurn))
+
+      const after = stateRef.current
+      const isWin = Boolean(after.winningLine)
+
+      playSound(isWin ? 'win' : 'place')
+
+      if (before.gameMode === 'online' && before.lobbyId) {
+        const nextIndex = (lobbyIndexRef.current ?? 0) + 1
+        lobbyIndexRef.current = nextIndex
+
+        await patchLobby(before.lobbyId, {
+          board_state: after.board,
+          current_turn: after.currentTurn,
+          host_can_place: false,
+          guest_can_place: false,
+          ...(after.isGameOver
+            ? { status: 'completed', winner_id: after.winner?.id ?? null }
+            : { current_question_index: nextIndex }),
+        })
+
+        if (!after.isGameOver) {
+          updateState((state) => ({ ...state, currentQuestion: onlineQuestion(nextIndex) }))
+        }
+
+        return true
+      }
+
+      if (after.isGameOver) return true
+
+      if (before.gameMode === 'single') {
+        playComputerTurn()
+      } else {
+        updateState((state) => ({ ...state, currentQuestion: takeNextQuestion() }))
+      }
+
+      return true
+    },
+    [finishMove, onlineQuestion, playComputerTurn, takeNextQuestion, updateState]
+  )
+
+  const handleContinueAfterWrongAnswer = useCallback(() => {
+    const { pendingTurnSwitch, gameMode, lobbyId, players, currentPlayer, currentTurn } =
+      stateRef.current
+
+    if (!pendingTurnSwitch) return
+
+    const nextPlayer = players.find((player) => player.id !== currentPlayer?.id)
+    const turn = nextPlayer?.piece || currentTurn
+
+    updateState((state) => ({
+      ...state,
+      currentPlayer: nextPlayer || state.currentPlayer,
+      currentTurn: turn,
+      canPlacePiece: false,
+      pendingTurnSwitch: false,
+    }))
+
+    if (gameMode === 'online' && lobbyId) {
+      const nextIndex = (lobbyIndexRef.current ?? 0) + 1
+      lobbyIndexRef.current = nextIndex
+      patchLobby(lobbyId, { current_turn: turn, current_question_index: nextIndex })
+      updateState((state) => ({ ...state, currentQuestion: onlineQuestion(nextIndex) }))
+      return
+    }
+
+    if (gameMode === 'single') {
+      playComputerTurn()
+      return
+    }
+
+    updateState((state) => ({ ...state, currentQuestion: takeNextQuestion() }))
+  }, [onlineQuestion, playComputerTurn, takeNextQuestion, updateState])
+
+  const completePhysicalPlacement = useCallback(() => {
+    if (stateRef.current.boardMode !== 'physical' || !stateRef.current.canPlacePiece) return
+
+    updateState((state) => {
+      const turn = nextPiece(state.currentTurn)
+
+      return {
+        ...state,
+        currentTurn: turn,
+        currentPlayer: state.players.find((player) => player.piece === turn) || state.currentPlayer,
+        canPlacePiece: false,
+        pendingTurnSwitch: false,
+        currentQuestion: takeNextQuestion(),
+      }
+    })
+  }, [takeNextQuestion, updateState])
+
+  const resetLocalGame = useCallback(() => {
+    clearComputerTimer()
+    queueRef.current = shuffle(queueRef.current)
+
+    updateState((state) => ({
+      ...state,
+      board: createEmptyBoard(),
+      currentTurn: 'X',
+      canPlacePiece: false,
+      winner: null,
+      isDraw: false,
+      isGameOver: false,
+      winningLine: null,
+      lastMove: null,
+      isGameActive: true,
+      currentPlayer: state.players[0],
+      players: state.players.map((player) => ({ ...player, score: 0 })),
+      pendingTurnSwitch: false,
+      isComputerThinking: false,
+      missedQuestions: [],
+      tallies: {},
+      rematch: { isWaiting: false, requesterName: null, rejecterName: null },
+      currentQuestion: state.gameMode === 'online' ? state.currentQuestion : takeNextQuestion(),
+    }))
+  }, [clearComputerTimer, takeNextQuestion, updateState])
+
+  const resetBoard = useCallback(async () => {
+    const { gameMode, lobbyId } = stateRef.current
+
+    if (gameMode === 'online' && lobbyId) {
+      const startIndex = Math.floor(Math.random() * Math.max(questionsRef.current.length, 1))
+      const saved = await patchLobby(lobbyId, {
+        board_state: createEmptyBoard(),
+        current_turn: 'X',
+        host_can_place: false,
+        guest_can_place: false,
+        winner_id: null,
+        status: 'active',
+        host_score: 0,
+        guest_score: 0,
+        host_answered: 0,
+        host_correct: 0,
+        guest_answered: 0,
+        guest_correct: 0,
+        current_question_index: startIndex,
+      })
+
+      if (!saved) {
+        toast.error(t('game.resetFailed'))
+        return
+      }
+
+      lobbyIndexRef.current = startIndex
+      updateState((state) => ({ ...state, currentQuestion: onlineQuestion(startIndex) }))
+    }
+
+    resetLocalGame()
+  }, [onlineQuestion, resetLocalGame, t, updateState])
+
+  const leaveGame = useCallback(async () => {
+    const { lobbyId, opponentLeft } = stateRef.current
+
+    stopPolling()
+    clearComputerTimer()
+    rememberLobby(null)
+
+    if (lobbyId && !opponentLeft) {
+      try {
+        await fetch(`/api/lobby/${lobbyId}`, { method: 'DELETE' })
+      } catch (error) {
+        logger.error('Error leaving lobby:', error)
+      }
+    }
+
+    lobbyIndexRef.current = null
+    queueRef.current = []
+    updateState(() => createInitialState())
+  }, [clearComputerTimer, stopPolling, updateState])
+
+  const syncLobby = useCallback(
+    async (lobbyId: string) => {
+      // Skip hidden tabs; polling resumes when the player comes back
+      if (typeof document !== 'undefined' && document.hidden) return
+
+      try {
+        const response = await fetch(`/api/lobby/${lobbyId}`)
+
+        if (response.status === 404) {
+          stopPolling()
+          rememberLobby(null)
+
+          if (!stateRef.current.isGameOver) {
+            updateState((state) => ({ ...state, opponentLeft: true }))
+          }
+          return
+        }
+
+        if (!response.ok) return
+
+        const { lobby }: { lobby: LobbySnapshot } = await response.json()
+        const before = stateRef.current
+        const myId = userId
+
+        if (lobby.status === 'cancelled') {
+          updateState((state) => ({ ...state, opponentLeft: true }))
+          return
+        }
+
+        if (before.isHost && before.players.length === 1 && lobby.guest_user_id) {
+          toast.info(t('lobby.playerJoined', { name: lobby.guest_name || '' }))
+          playSound('correct')
+        }
+
+        updateState((state) => {
+          const next = applyLobby(state, lobby)
+          const indexChanged = lobby.current_question_index !== lobbyIndexRef.current
+
+          return {
+            ...next,
+            currentQuestion: indexChanged
+              ? onlineQuestion(lobby.current_question_index)
+              : next.currentQuestion,
+            rematch: {
+              ...next.rematch,
+              requesterName:
+                lobby.play_again_request && lobby.play_again_request !== myId
+                  ? lobby.play_again_requester_name || t('game.opponent')
+                  : null,
+              rejecterName:
+                lobby.play_again_rejected && next.rematch.isWaiting
+                  ? lobby.play_again_rejecter_name || t('game.opponent')
+                  : next.rematch.rejecterName,
+            },
+          }
+        })
+
+        lobbyIndexRef.current = lobby.current_question_index
+
+        const after = stateRef.current
+
+        if (!before.isGameOver && after.isGameOver) {
+          playSound(after.winner?.id === myId ? 'win' : 'lose')
+        }
+        if (before.currentTurn !== after.currentTurn && after.currentPlayer?.id === myId) {
+          playSound('turn')
+        }
+
+        if (lobby.play_again_accepted && before.rematch.isWaiting) {
+          await patchLobby(lobbyId, { play_again_accepted: false })
+          resetLocalGame()
+        }
+      } catch (error) {
+        logger.error('Error syncing lobby:', error)
+      }
+    },
+    [onlineQuestion, resetLocalGame, stopPolling, t, updateState, userId]
+  )
+
+  const syncLobbyRef = useRef(syncLobby)
+
+  useEffect(() => {
+    syncLobbyRef.current = syncLobby
+  }, [syncLobby])
+
+  const startPolling = useCallback(
+    (lobbyId: string) => {
+      stopPolling()
+      pollingRef.current = setInterval(() => syncLobbyRef.current(lobbyId), POLL_INTERVAL_MS)
+      syncLobbyRef.current(lobbyId)
+    },
+    [stopPolling]
+  )
+
+  const enterLobby = useCallback(
+    (lobby: LobbySnapshot) => {
+      const isHost = lobby.host_user_id === userId
+
+      lobbyIndexRef.current = lobby.current_question_index
+      rememberLobby(lobby.lobby_code)
+
+      updateState((state) => ({
+        ...applyLobby({ ...createInitialState(), isHost, board: state.board }, lobby),
+        gameMode: 'online',
+        lobbyId: lobby.id,
+        lobbyCode: lobby.lobby_code,
+        isHost,
+        questionTimeLimit: ONLINE_TIME_LIMIT_SECONDS,
+        currentQuestion: onlineQuestion(lobby.current_question_index),
+      }))
+
+      startPolling(lobby.id)
+    },
+    [onlineQuestion, startPolling, updateState, userId]
+  )
+
+  const createLobby = useCallback(async () => {
+    try {
+      const response = await fetch('/api/lobby/create', { method: 'POST' })
+      const data = await response.json()
+
+      if (!response.ok) {
+        toast.error(t('lobby.createFailed'), { description: translateError(data.error) })
         return null
       }
 
-      const { lobby } = await response.json()
-
-      // Set up host as player 1
-      const player1: Player = {
-        id: userId,
-        name: userName,
-        score: 0,
-        avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userName}`,
-        isOnline: true,
-        piece: "X",
-      }
-
-      setGameState((prev) => ({
-        ...prev,
-        currentPlayer: player1,
-        players: [player1],
-        gameMode: "online",
-        lobbyId: lobby.id,
-        lobbyCode: lobby.lobby_code,
-        isHost: true,
-        isGameActive: false, // Wait for second player
-        currentQuestion: questions.length > 0 ? questions[0] : null,
-      }))
-
-      // Start polling for lobby updates
-      console.log('Starting polling for lobby:', lobby.id);
-      startPolling(lobby.id)
-
-      return {
-        lobbyCode: lobby.lobby_code,
-        lobbyId: lobby.id,
-      }
+      enterLobby(data.lobby)
+      return { lobbyCode: data.lobby.lobby_code as string, lobbyId: data.lobby.id as string }
     } catch (error) {
-      console.error('Error creating lobby:', error)
-      toast.error('Failed to create lobby')
+      logger.error('Error creating lobby:', error)
+      toast.error(t('lobby.createFailed'))
       return null
     }
-  }
+  }, [enterLobby, t, translateError])
 
-  const joinLobby = async (lobbyCode: string, userId: string, userName: string): Promise<boolean> => {
+  const joinLobby = useCallback(
+    async (lobbyCode: string): Promise<boolean> => {
+      try {
+        const response = await fetch('/api/lobby/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lobbyCode }),
+        })
+        const data = await response.json()
+
+        if (!response.ok) {
+          toast.error(t('lobby.joinFailed'), { description: translateError(data.error) })
+          return false
+        }
+
+        enterLobby(data.lobby)
+        return true
+      } catch (error) {
+        logger.error('Error joining lobby:', error)
+        toast.error(t('lobby.joinFailed'))
+        return false
+      }
+    },
+    [enterLobby, t, translateError]
+  )
+
+  const startOnlineGame = useCallback(async () => {
+    const { lobbyId } = stateRef.current
+    if (!lobbyId) return false
+
+    const startIndex = Math.floor(Math.random() * Math.max(questionsRef.current.length, 1))
+    const started = await patchLobby(lobbyId, {
+      status: 'active',
+      current_question_index: startIndex,
+    })
+
+    if (started) {
+      lobbyIndexRef.current = startIndex
+      updateState((state) => ({ ...state, currentQuestion: onlineQuestion(startIndex) }))
+    }
+
+    return started
+  }, [onlineQuestion, updateState])
+
+  // Puts a player back into their game after a refresh or a dropped connection
+  const resumeOnlineGame = useCallback(async () => {
+    const lobbyCode = recallLobby()
+    if (!lobbyCode || !user || isGuest || stateRef.current.lobbyId) return
+
     try {
       const response = await fetch('/api/lobby/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lobbyCode, userId, userName }),
+        body: JSON.stringify({ lobbyCode }),
       })
 
       if (!response.ok) {
-        const error = await response.json()
-        toast.error('Failed to join lobby', {
-          description: error.error || 'Please check the code and try again',
-        })
-        return false
+        rememberLobby(null)
+        return
       }
 
-      const { lobby } = await response.json()
-
-      // Set up guest as player 2
-      const player1: Player = {
-        id: lobby.host_user_id,
-        name: lobby.host_name,
-        score: lobby.host_score || 0,
-        avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${lobby.host_name}`,
-        isOnline: true,
-        piece: "X",
-      }
-
-      const player2: Player = {
-        id: userId,
-        name: userName,
-        score: lobby.guest_score || 0,
-        avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userName}`,
-        isOnline: true,
-        piece: "O",
-      }
-
-      setGameState((prev) => ({
-        ...prev,
-        currentPlayer: player2,
-        players: [player1, player2],
-        gameMode: "online",
-        lobbyId: lobby.id,
-        lobbyCode: lobby.lobby_code,
-        isHost: false,
-        isGameActive: lobby.status === 'active', // Don't auto-activate, wait for host
-        board: lobby.board_state || createEmptyBoard(),
-        currentTurn: lobby.current_turn || "X",
-        canPlacePiece: false,
-        currentQuestion: questions.length > 0 ? questions[lobby.current_question_index || 0] : null,
-      }))
-
-      setQuestionIndex(lobby.current_question_index || 0)
-
-      // Start polling for lobby updates
-      startPolling(lobby.id)
-
-      return true
+      const { lobby }: { lobby: LobbySnapshot } = await response.json()
+      enterLobby(lobby)
+      toast.success(t('lobby.reconnected'))
     } catch (error) {
-      console.error('Error joining lobby:', error)
-      toast.error('Failed to join lobby')
-      return false
+      logger.error('Error resuming game:', error)
     }
-  }
+  }, [enterLobby, isGuest, t, user])
 
-  const startPolling = (lobbyId: string) => {
-    // Clear any existing interval
-    if (pollingIntervalRef.current) {
-      console.log('Clearing existing polling interval');
-      clearInterval(pollingIntervalRef.current)
-    }
+  const requestRematch = useCallback(async () => {
+    const { lobbyId } = stateRef.current
+    if (!lobbyId || !user) return
 
-    console.log('Setting up polling interval for lobby:', lobbyId);
-    // Poll every 2 seconds
-    pollingIntervalRef.current = setInterval(() => {
-      console.log('Polling lobby state...');
-      syncLobbyState(lobbyId)
-    }, 2000)
-    
-    // Do an immediate sync when starting polling
-    syncLobbyState(lobbyId)
-  }
+    updateState((state) => ({
+      ...state,
+      rematch: { ...state.rematch, isWaiting: true, rejecterName: null },
+    }))
 
-  const syncLobbyState = async (lobbyId?: string) => {
-    const targetLobbyId = lobbyId || gameState.lobbyId
-    if (!targetLobbyId) return
+    await patchLobby(lobbyId, {
+      play_again_request: user.id,
+      play_again_requester_name: user.name,
+      play_again_accepted: false,
+      play_again_rejected: false,
+    })
+  }, [updateState, user])
 
-    try {
-      const response = await fetch(`/api/lobby/${targetLobbyId}`)
-      
-      // Check if lobby was deleted (404)
-      if (response.status === 404) {
-        console.log('Lobby not found (404) - stopping polling')
-        if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current)
-          pollingIntervalRef.current = null
-        }
-        
-        // If game is completed or has a winner, this is expected cleanup
-        // Don't reset state - let players see the victory dialog
-        if (gameState.isGameOver || gameState.winner) {
-          console.log('Game completed, lobby cleanup is normal - keeping victory dialog')
-          return
-        }
-        
-        // If game was active but not completed, show error (but don't reset)
-        if (gameState.isGameActive) {
-          console.log('Game active but lobby deleted - unusual but staying in game')
-          toast.error('Connection Lost', {
-            description: 'Lost connection to game lobby',
-          })
-        } else {
-          // Otherwise, host left before game started
-          toast.error('Lobby Closed', {
-            description: 'The host has left the lobby',
-          })
-          leaveGame()
-        }
-        return
-      }
-      
-      if (!response.ok) {
-        console.error('Failed to sync lobby:', response.status)
-        return
-      }
+  const cancelRematch = useCallback(async () => {
+    const { lobbyId } = stateRef.current
+    if (!lobbyId) return
 
-      const { lobby } = await response.json()
-      console.log('=== SYNC LOBBY STATE ===')
-      console.log('Raw lobby data:', JSON.stringify(lobby, null, 2))
-      console.log('Lobby host_user_id:', lobby.host_user_id)
-      console.log('Lobby guest_user_id:', lobby.guest_user_id)
-      console.log('Lobby host_name:', lobby.host_name)
-      console.log('Lobby guest_name:', lobby.guest_name)
-      console.log('Lobby status:', lobby.status)
+    updateState((state) => ({ ...state, rematch: { ...state.rematch, isWaiting: false } }))
+    await patchLobby(lobbyId, { play_again_request: null, play_again_requester_name: null })
+  }, [updateState])
 
-      // Check if lobby was cancelled
-      if (lobby.status === 'cancelled') {
-        toast.error('Lobby Closed', {
-          description: 'The host has left the game',
-        })
-        leaveGame()
-        return
-      }
+  const acceptRematch = useCallback(async () => {
+    const { lobbyId } = stateRef.current
+    if (!lobbyId) return
 
-      // Note: Keep polling during 'active' and 'completed' status
-      // We need to keep polling even after game completion for play again requests
-      // Only stop polling when lobby is deleted (404) or cancelled
+    await patchLobby(lobbyId, {
+      play_again_request: null,
+      play_again_requester_name: null,
+      play_again_accepted: true,
+    })
+    await resetBoard()
+  }, [resetBoard])
 
-      // Update game state from lobby
-      setGameState((prev) => {
-        console.log('Previous players:', prev.players)
-        console.log('Previous players length:', prev.players.length)
-        console.log('Is host?', prev.isHost)
+  const declineRematch = useCallback(async () => {
+    const { lobbyId } = stateRef.current
+    if (!lobbyId) return
 
-        // Always construct players from fresh lobby data to avoid stale information
-        const player1 = {
-          id: lobby.host_user_id,
-          name: lobby.host_name,
-          score: lobby.host_score || 0,
-          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${lobby.host_name}`,
-          isOnline: true,
-          piece: "X" as const,
-        }
+    await patchLobby(lobbyId, {
+      play_again_request: null,
+      play_again_requester_name: null,
+      play_again_rejected: true,
+      play_again_rejecter_name: user?.name ?? null,
+    })
+    await leaveGame()
+  }, [leaveGame, user?.name])
 
-        const player2 = lobby.guest_user_id ? {
-          id: lobby.guest_user_id,
-          name: lobby.guest_name,
-          score: lobby.guest_score || 0,
-          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${lobby.guest_name}`,
-          isOnline: true,
-          piece: "O" as const,
-        } : null
-
-        console.log('Constructed player1:', player1)
-        console.log('Constructed player2:', player2)
-
-        const players = player2 ? [player1, player2] : [player1]
-        console.log('Final players array:', players)
-        console.log('Final players length:', players.length)
-
-        // If we're host and guest just joined, show notification
-        const guestJustJoined = prev.isHost && prev.players.length === 1 && player2
-
-        if (guestJustJoined) {
-          console.log('Guest just joined!', lobby.guest_name)
-          toast.info('Player Joined!', {
-            description: `${lobby.guest_name} has joined the game`,
-          })
-        }
-
-        // Log player update
-        console.log('Updating state with players:', players)
-
-        // Determine currentPlayer based on current_turn, not on who the user is
-        const currentTurn = lobby.current_turn || prev.currentTurn
-        const currentPlayer = players.find(p => p.piece === currentTurn) || player1
-
-        return {
-          ...prev,
-          players,
-          isGameActive: lobby.status === 'active',
-          board: lobby.board_state || prev.board,
-          currentTurn,
-          canPlacePiece: prev.isHost ? lobby.host_can_place : lobby.guest_can_place,
-          currentPlayer,
-          winner: lobby.winner_id ? players.find(p => p.id === lobby.winner_id) || null : null,
-          isGameOver: lobby.status === 'completed',
-        }
-      })
-
-      // Update question index if changed
-      if (lobby.current_question_index !== questionIndex) {
-        setQuestionIndex(lobby.current_question_index)
-        setGameState((prev) => ({
-          ...prev,
-          currentQuestion: questions.length > 0 ? questions[lobby.current_question_index] : null,
-        }))
-      }
-    } catch (error) {
-      console.error('Error syncing lobby state:', error)
-    }
-  }
-
-  // Cleanup polling on unmount
-  useEffect(() => {
-    return () => {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current)
-      }
-    }
-  }, [])
-
-  return (
-    <GameContext.Provider
-      value={{
-        gameState,
-        joinGame,
-        scanQRCode,
-        answerQuestion,
-        nextQuestion,
-        updateScore,
-        leaveGame,
-        placePiece,
-        resetBoard,
-        addSecondPlayer,
-        createLobby,
-        joinLobby,
-        syncLobbyState,
-        handleContinueAfterWrongAnswer,
-        completePhysicalPlacement,
-      }}
-    >
-      {children}
-    </GameContext.Provider>
+  useEffect(
+    () => () => {
+      stopPolling()
+      clearComputerTimer()
+    },
+    [clearComputerTimer, stopPolling]
   )
+
+  const value = useMemo(
+    () => ({
+      gameState,
+      questions,
+      joinGame,
+      answerQuestion,
+      placePiece,
+      handleContinueAfterWrongAnswer,
+      completePhysicalPlacement,
+      resetBoard,
+      leaveGame,
+      createLobby,
+      joinLobby,
+      startOnlineGame,
+      resumeOnlineGame,
+      requestRematch,
+      cancelRematch,
+      acceptRematch,
+      declineRematch,
+    }),
+    [
+      gameState,
+      questions,
+      joinGame,
+      answerQuestion,
+      placePiece,
+      handleContinueAfterWrongAnswer,
+      completePhysicalPlacement,
+      resetBoard,
+      leaveGame,
+      createLobby,
+      joinLobby,
+      startOnlineGame,
+      resumeOnlineGame,
+      requestRematch,
+      cancelRematch,
+      acceptRematch,
+      declineRematch,
+    ]
+  )
+
+  return <GameContext.Provider value={value}>{children}</GameContext.Provider>
 }
 
 export function useGame() {
   const context = useContext(GameContext)
   if (context === undefined) {
-    throw new Error("useGame must be used within a GameProvider")
+    throw new Error('useGame must be used within a GameProvider')
   }
   return context
 }

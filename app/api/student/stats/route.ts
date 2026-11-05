@@ -1,51 +1,41 @@
-import { NextResponse } from 'next/server';
-import { supabaseAdmin, isDevMode } from '@/lib/supabase';
-import { findDevUserByEmail } from '@/lib/dev-users';
-import { getDevStats } from '../update-stats/route';
-import { getDevMatchHistory } from '../../match-history/save/route';
+import { NextResponse } from 'next/server'
+import { supabaseAdmin, isDevMode } from '@/lib/supabase'
+import { devStore } from '@/lib/dev-store'
+import { findDevUserById } from '@/lib/dev-users'
+import { requireUser } from '@/lib/session'
+import { logger } from '@/lib/logger'
 
-export const dynamic = 'force-dynamic';
+export const dynamic = 'force-dynamic'
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    // Get user email from request header
-    const userEmail = request.headers.get('x-user-email');
-    
-    if (!userEmail) {
-      return NextResponse.json(
-        { error: 'Email required' },
-        { status: 400 }
-      );
-    }
+    const session = await requireUser()
+    if (session instanceof NextResponse) return session
 
     // In dev mode, use dev users
     if (isDevMode) {
-      const devUser = await findDevUserByEmail(userEmail);
-      
+      const devUser = findDevUserById(session.userId)
+
       if (!devUser) {
-        return NextResponse.json(
-          { error: 'User not found' },
-          { status: 404 }
-        );
+        return NextResponse.json({ error: 'User not found' }, { status: 404 })
       }
 
       // Get stats from in-memory store
-      const devStats = getDevStats();
-      const userStats = devStats.get(devUser.id) || {
+      const userStats = devStore.stats.get(devUser.id) || {
         total_score: 0,
         highest_score: 0,
         matches_played: 0,
         wins: 0,
         losses: 0,
-      };
+      }
 
-      const accuracy = userStats.matches_played > 0 
-        ? Math.round((userStats.wins / userStats.matches_played) * 100)
-        : 0;
+      const accuracy =
+        userStats.matches_played > 0
+          ? Math.round((userStats.wins / userStats.matches_played) * 100)
+          : 0
 
       // Get match history from in-memory store
-      const devMatchHistoryStore = getDevMatchHistory();
-      const userMatchHistory = devMatchHistoryStore.get(devUser.id) || [];
+      const userMatchHistory = devStore.matchHistory.get(devUser.id) || []
 
       return NextResponse.json({
         user: {
@@ -59,12 +49,16 @@ export async function GET(request: Request) {
           totalMatches: userStats.matches_played,
           totalScore: userStats.total_score,
           highestScore: userStats.highest_score,
-          avgScore: userStats.matches_played > 0 ? Math.round(userStats.total_score / userStats.matches_played) : 0,
+          avgScore:
+            userStats.matches_played > 0
+              ? Math.round(userStats.total_score / userStats.matches_played)
+              : 0,
           accuracy,
-          totalCorrect: 0, // Not tracking this separately
-          totalQuestions: 0,
+          wins: userStats.wins,
+          totalCorrect: userMatchHistory.reduce((sum, m) => sum + m.correct_answers, 0),
+          totalQuestions: userMatchHistory.reduce((sum, m) => sum + m.total_questions, 0),
         },
-        matchHistory: userMatchHistory.map(match => ({
+        matchHistory: userMatchHistory.map((match) => ({
           id: match.id,
           score: match.score || 0,
           correctAnswers: match.correct_answers || 0,
@@ -76,22 +70,21 @@ export async function GET(request: Request) {
           opponentScore: match.opponent_score,
           isWinner: match.is_winner,
         })),
-      });
+      })
     }
 
     // Get user from database with stats fields using admin client
     const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
-      .select('id, email, name, role, created_at, total_score, highest_score, matches_played, wins, losses')
-      .eq('email', userEmail)
-      .single();
+      .select(
+        'id, email, name, role, created_at, total_score, highest_score, matches_played, wins, losses'
+      )
+      .eq('id', session.userId)
+      .single()
 
     if (userError || !userData) {
-      console.error('Error fetching user:', userError);
-      return NextResponse.json(
-        { error: 'User not found' },
-        { status: 404 }
-      );
+      logger.error('Error fetching user:', userError)
+      return NextResponse.json({ error: 'User not found' }, { status: 404 })
     }
 
     // Get match history using admin client
@@ -100,7 +93,7 @@ export async function GET(request: Request) {
       .select('*')
       .eq('user_id', userData.id)
       .order('completed_at', { ascending: false })
-      .limit(50);
+      .limit(50)
 
     // If match_history table doesn't exist yet, return zero stats
     if (matchError && matchError.code === '42P01') {
@@ -118,24 +111,23 @@ export async function GET(request: Request) {
           highestScore: 0,
           avgScore: 0,
           accuracy: 0,
+          wins: 0,
           totalCorrect: 0,
           totalQuestions: 0,
         },
         matchHistory: [],
-      });
+      })
     }
 
     // Use stats from users table
-    const matchHistory = matches || [];
-    const totalMatches = userData.matches_played || 0;
-    const totalScore = userData.total_score || 0;
-    const highestScore = userData.highest_score || 0;
-    const avgScore = totalMatches > 0 ? Math.round(totalScore / totalMatches) : 0;
-    const totalCorrect = matchHistory.reduce((sum, m) => sum + (m.correct_answers || 0), 0);
-    const totalQuestions = matchHistory.reduce((sum, m) => sum + (m.total_questions || 0), 0);
-    const accuracy = totalMatches > 0 
-      ? Math.round(((userData.wins || 0) / totalMatches) * 100) 
-      : 0;
+    const matchHistory = matches || []
+    const totalMatches = userData.matches_played || 0
+    const totalScore = userData.total_score || 0
+    const highestScore = userData.highest_score || 0
+    const avgScore = totalMatches > 0 ? Math.round(totalScore / totalMatches) : 0
+    const totalCorrect = matchHistory.reduce((sum, m) => sum + (m.correct_answers || 0), 0)
+    const totalQuestions = matchHistory.reduce((sum, m) => sum + (m.total_questions || 0), 0)
+    const accuracy = totalMatches > 0 ? Math.round(((userData.wins || 0) / totalMatches) * 100) : 0
 
     return NextResponse.json({
       user: {
@@ -151,10 +143,11 @@ export async function GET(request: Request) {
         highestScore,
         avgScore,
         accuracy,
+        wins: userData.wins || 0,
         totalCorrect,
         totalQuestions,
       },
-      matchHistory: matchHistory.map(match => ({
+      matchHistory: matchHistory.map((match) => ({
         id: match.id,
         score: match.score || 0,
         correctAnswers: match.correct_answers || 0,
@@ -166,13 +159,9 @@ export async function GET(request: Request) {
         opponentScore: match.opponent_score || 0,
         isWinner: match.is_winner || false,
       })),
-    });
+    })
   } catch (error) {
-    console.error('Server error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    logger.error('Server error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
-

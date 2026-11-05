@@ -1,452 +1,250 @@
-"use client";
+'use client'
 
-import { useEffect, useState, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from 'next/navigation'
+import { Activity, Award, CheckCircle2, Lock, Target, TrendingUp, Trophy } from 'lucide-react'
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import {
-  Terminal,
-  Trophy,
-  Target,
-  Activity,
-  TrendingUp,
-  Clock,
-  ArrowLeft,
-  LogOut,
-} from "lucide-react";
-import { toast } from "sonner";
-import { useAuth } from "@/components/auth-provider";
+  DashboardHeader,
+  DashboardSkeleton,
+  EmptyState,
+  ErrorState,
+  Section,
+  StatCard,
+  TopicBars,
+  formatDuration,
+} from '@/components/dashboard/shared'
+import { useI18n } from '@/components/i18n-provider'
+import { PlayerAvatar } from '@/components/player-avatar'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { getJson, useFetchJson } from '@/hooks/use-fetch-json'
+import { evaluateAchievements } from '@/lib/achievements'
+import type { MissedQuestionSummary, TopicProgress } from '@/lib/learning'
+import type { MessageKey } from '@/lib/i18n/messages'
 
 interface MatchRecord {
-  id: string;
-  score: number;
-  correctAnswers: number;
-  totalQuestions: number;
-  gameMode: string;
-  duration: number;
-  completedAt: string;
-  opponentName?: string;
-  opponentScore?: number;
-  isWinner?: boolean;
+  id: string
+  score: number
+  correctAnswers: number
+  totalQuestions: number
+  gameMode: string
+  duration: number
+  completedAt: string
+  opponentName?: string
+  opponentScore?: number
+  isWinner?: boolean
 }
 
 interface StudentData {
-  user: {
-    id: string;
-    email: string;
-    name: string | null;
-    role: string;
-    createdAt: string;
-  };
+  user: { id: string; email: string; name: string | null; role: string; createdAt: string }
   stats: {
-    totalMatches: number;
-    totalScore: number;
-    highestScore: number;
-    avgScore: number;
-    accuracy: number;
-    totalCorrect: number;
-    totalQuestions: number;
-  };
-  matchHistory: MatchRecord[];
+    totalMatches: number
+    totalScore: number
+    highestScore: number
+    avgScore: number
+    accuracy: number
+    wins: number
+    totalCorrect: number
+    totalQuestions: number
+  }
+  matchHistory: MatchRecord[]
+}
+
+interface LearningData {
+  topics: TopicProgress[]
+  reviewQuestions: MissedQuestionSummary[]
+  totalAttempts: number
+  totalCorrect: number
+}
+
+async function loadDashboard() {
+  const [student, learning] = await Promise.all([
+    getJson<StudentData>('/api/student/stats'),
+    getJson<LearningData>('/api/student/learning'),
+  ])
+
+  return { student, learning }
+}
+
+function correctOption(question: MissedQuestionSummary['question']): string {
+  return [question.option_a, question.option_b, question.option_c, question.option_d][
+    question.correct_answer
+  ]
+}
+
+function Achievements({ student, learning }: Awaited<ReturnType<typeof loadDashboard>>) {
+  const { t } = useI18n()
+  const achievements = evaluateAchievements({
+    totalMatches: student.stats.totalMatches,
+    wins: student.stats.wins,
+    highestScore: student.stats.highestScore,
+    totalCorrect: learning.totalCorrect,
+    topicsPractised: learning.topics.length,
+  })
+
+  return (
+    <Section title={t('learn.achievements')}>
+      <ul className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+        {achievements.map(({ id, goal, value, isUnlocked }) => (
+          <li
+            key={id}
+            className={`p-3 rounded-lg border min-w-0 ${
+              isUnlocked ? 'border-accent/50 bg-accent/10' : 'border-border opacity-70'
+            }`}
+          >
+            <div className="flex items-center gap-1.5 font-semibold text-sm">
+              {isUnlocked ? (
+                <Award className="h-4 w-4 shrink-0 text-accent" />
+              ) : (
+                <Lock className="h-4 w-4 shrink-0" />
+              )}
+              <span className="truncate">{t(`achievement.${id}`)}</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(`achievement.${id}Hint` as MessageKey)}
+            </p>
+            {!isUnlocked && (
+              <p className="text-xs font-mono mt-1">
+                {value} / {goal}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Section>
+  )
 }
 
 export default function StudentDashboard() {
-  const [data, setData] = useState<StudentData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const router = useRouter();
-  const { user, logout } = useAuth();
-  const hasFetchedRef = useRef(false);
+  const { t, locale } = useI18n()
+  const router = useRouter()
+  const { data, hasFailed, reload } = useFetchJson(loadDashboard)
 
-  const handleLogout = async () => {
-    try {
-      await logout();
-      toast.success("Logged out successfully");
-    } catch (error) {
-      toast.error("Failed to logout");
-    }
-  };
+  if (hasFailed) return <ErrorState onRetry={reload} />
+  if (!data) return <DashboardSkeleton />
 
-  useEffect(() => {
-    if (!user) {
-      router.push("/login");
-      return;
-    }
-
-    if (hasFetchedRef.current) {
-      return;
-    }
-
-    hasFetchedRef.current = true;
-    fetchStudentData();
-  }, [user, router]);
-
-  const fetchStudentData = async () => {
-    try {
-      console.log("[Dashboard] Fetching student data for user:", user?.email);
-
-      const headers: HeadersInit = {};
-      if (user?.email) {
-        headers["x-user-email"] = user.email;
-      }
-
-      const response = await fetch("/api/student/stats", { headers });
-
-      console.log("[Dashboard] API response status:", response.status);
-
-      if (response.status === 401) {
-        toast.error("Authentication required", {
-          description: "Please log in to view your dashboard",
-        });
-        router.push("/login");
-        return;
-      }
-
-      if (!response.ok) {
-        const errorData = await response
-          .json()
-          .catch(() => ({ error: "Unknown error" }));
-        console.error("[Dashboard] API Error:", errorData);
-
-        toast.error("Failed to load dashboard", {
-          description: errorData.error || `Server error (${response.status})`,
-        });
-        return;
-      }
-
-      const studentData = await response.json();
-      console.log("[Dashboard] Student data received successfully");
-      setData(studentData);
-    } catch (error) {
-      console.error("[Dashboard] Fetch error:", error);
-      toast.error("Failed to load dashboard", {
-        description:
-          error instanceof Error ? error.message : "Network error occurred",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen cyber-grid flex items-center justify-center">
-        <div className="text-center">
-          <Terminal className="h-12 w-12 text-primary animate-pulse mx-auto mb-4" />
-          <p className="text-muted-foreground font-mono">
-            Loading dashboard...
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="min-h-screen cyber-grid flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-muted-foreground font-mono">No data available</p>
-        </div>
-      </div>
-    );
-  }
-
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
+  const { student, learning } = data
+  const { stats, user, matchHistory } = student
+  const formatDate = (date: string) => new Date(date).toLocaleDateString(locale)
+  const answerAccuracy =
+    learning.totalAttempts > 0
+      ? `${Math.round((learning.totalCorrect / learning.totalAttempts) * 100)}%`
+      : '-'
 
   return (
-    <div className="min-h-screen cyber-grid">
-      <div className="container mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-12">
-          <div className="flex items-center gap-3">
-            <div className="p-3 rounded-xl bg-primary/10 border border-primary/20 glow-primary">
-              <Terminal className="h-8 w-8 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-primary via-accent to-secondary bg-clip-text text-transparent font-mono">
-                MY DASHBOARD
-              </h1>
-              <p className="text-muted-foreground font-mono mt-1">
-                {">"} Personal Stats & Match History
-              </p>
+    <div className="min-h-dvh cyber-grid">
+      <main className="mx-auto max-w-5xl px-4 py-6 space-y-4">
+        <DashboardHeader title={t('dash.studentTitle')} />
+
+        <section className="flex items-center gap-3 rounded-xl border border-primary/30 bg-card/90 p-3 sm:p-4">
+          <PlayerAvatar name={user.name || user.email} className="h-14 w-14 text-xl" />
+          <div className="min-w-0 flex-1">
+            <div className="font-bold text-lg truncate">{user.name || user.email}</div>
+            <div className="text-sm text-muted-foreground truncate">{user.email}</div>
+            <div className="text-xs text-muted-foreground">
+              {t('dash.joined', { date: formatDate(user.createdAt) })}
             </div>
           </div>
-          <div className="flex gap-3">
-            <Button
-              onClick={() => router.push("/")}
-              variant="outline"
-              className="cyber-border gap-2 hover:!text-foreground hover:!border-primary hover:shadow-[0_0_20px_rgba(0,255,255,0.4)] transition-all duration-300"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Back to Game
-            </Button>
-            <Button
-              onClick={handleLogout}
-              variant="outline"
-              className="cyber-border gap-2 border-destructive/30 hover:!border-destructive hover:bg-destructive/10 hover:!text-destructive text-destructive hover:shadow-[0_0_20px_rgba(239,68,68,0.4)] transition-all duration-300"
-            >
-              <LogOut className="h-4 w-4" />
-              Logout
-            </Button>
-          </div>
+          <Badge className="bg-primary/20 text-primary shrink-0">
+            {t(user.role === 'teacher' ? 'dash.teacher' : 'dash.student')}
+          </Badge>
+        </section>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatCard icon={Trophy} label={t('dash.highestScore')} value={stats.highestScore} />
+          <StatCard icon={Target} label={t('dash.totalScore')} value={stats.totalScore} />
+          <StatCard icon={Activity} label={t('dash.games')} value={stats.totalMatches} />
+          <StatCard
+            icon={TrendingUp}
+            label={t('dash.winRate')}
+            value={stats.totalMatches > 0 ? `${stats.accuracy}%` : '-'}
+          />
+          <StatCard icon={CheckCircle2} label={t('dash.answerAccuracy')} value={answerAccuracy} />
+          <StatCard
+            icon={TrendingUp}
+            label={t('dash.averageScore')}
+            value={stats.totalMatches > 0 ? stats.avgScore : '-'}
+          />
         </div>
 
-        {/* Profile Section */}
-        <div className="mb-8">
-          <Card className="cyber-border glow-primary">
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-6">
-                <Avatar className="h-20 w-20 border-4 border-primary/30">
-                  <AvatarFallback className="bg-primary/10 text-primary font-mono text-3xl">
-                    {(user?.name || data.user.name)?.[0] ||
-                      (user?.email || data.user.email)[0].toUpperCase()}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="flex-1">
-                  <h2 className="text-2xl font-bold font-mono text-foreground">
-                    {user?.name || data.user.name || "Student"}
-                  </h2>
-                  <p className="text-muted-foreground font-mono">
-                    {user?.email || data.user.email}
+        <Section title={t('learn.topics')} hint={t('learn.topicsHint')}>
+          {learning.topics.length > 0 ? (
+            <TopicBars topics={learning.topics} />
+          ) : (
+            <EmptyState text={t('learn.topicsEmpty')} />
+          )}
+        </Section>
+
+        <Section title={t('learn.review')} hint={t('learn.reviewHint')}>
+          {learning.reviewQuestions.length > 0 ? (
+            <ul className="space-y-2">
+              {learning.reviewQuestions.map(({ question, wrongCount }) => (
+                <li key={question.id} className="p-3 rounded-lg border border-border space-y-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="whitespace-pre-wrap min-w-0">{question.question}</p>
+                    <Badge variant="outline" className="shrink-0">
+                      {t('learn.wrongCount', { count: wrongCount })}
+                    </Badge>
+                  </div>
+                  <p className="font-semibold text-accent text-sm">
+                    {t('learn.answer', { answer: correctOption(question) })}
                   </p>
-                  <p className="text-sm text-muted-foreground mt-1 font-mono">
-                    Joined:{" "}
-                    {new Date(data.user.createdAt).toLocaleDateString("en-US", {
-                      year: "numeric",
-                      month: "long",
-                      day: "numeric",
-                    })}
-                  </p>
-                </div>
-                <Badge className="text-lg px-4 py-2 bg-primary/20 text-primary border-primary/30 font-mono">
-                  STUDENT
-                </Badge>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+                  <p className="text-sm text-muted-foreground">{question.explanation}</p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState text={t('learn.reviewEmpty')} />
+          )}
+        </Section>
 
-        {/* Stats Cards */}
-        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <Card className="cyber-border glow-primary">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2">
-                <Trophy className="h-5 w-5 text-primary" />
-                <CardTitle className="font-mono text-primary">
-                  Highest Score
-                </CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-4xl font-bold text-primary font-mono">
-                {data.stats.highestScore}
-              </div>
-            </CardContent>
-          </Card>
+        <Achievements student={student} learning={learning} />
 
-          <Card className="cyber-border glow-accent">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2">
-                <Target className="h-5 w-5 text-accent" />
-                <CardTitle className="font-mono text-accent">
-                  Total Score
-                </CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-4xl font-bold text-accent font-mono">
-                {data.stats.totalScore}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="cyber-border glow-secondary">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2">
-                <Activity className="h-5 w-5 text-secondary" />
-                <CardTitle className="font-mono text-secondary">
-                  Matches Played
-                </CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-4xl font-bold text-secondary font-mono">
-                {data.stats.totalMatches}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="cyber-border glow-primary">
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-5 w-5 text-chart-5" />
-                <CardTitle className="font-mono text-chart-5">
-                  Accuracy
-                </CardTitle>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="text-4xl font-bold text-chart-5 font-mono">
-                {data.stats.accuracy}%
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Match History */}
-        <Card className="cyber-border">
-          <CardHeader>
-            <CardTitle className="font-mono text-primary flex items-center gap-2">
-              <Clock className="h-5 w-5" />
-              Match History
-            </CardTitle>
-            <CardDescription className="font-mono">
-              Your recent game results
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {data.matchHistory.length > 0 ? (
-                data.matchHistory.map((match, index) => (
-                  <div
-                    key={match.id}
-                    className={`flex items-center gap-4 p-4 rounded-lg border transition-all ${
-                      match.isWinner
-                        ? "border-accent/40 hover:border-accent/60 hover:bg-accent/5"
-                        : "border-destructive/40 hover:border-destructive/60 hover:bg-destructive/5"
-                    }`}
-                  >
-                    <div
-                      className={`text-2xl font-bold font-mono w-12 text-center ${
-                        match.isWinner ? "text-accent" : "text-destructive"
-                      }`}
+        <Section title={t('dash.matchHistory')}>
+          {matchHistory.length > 0 ? (
+            <ul className="space-y-2">
+              {matchHistory.map((match) => (
+                <li
+                  key={match.id}
+                  className={`p-3 rounded-lg border grid grid-cols-2 md:grid-cols-5 gap-2 text-sm ${
+                    match.isWinner ? 'border-accent/40' : 'border-destructive/40'
+                  }`}
+                >
+                  <div>
+                    <div className="text-xs text-muted-foreground">{t('dash.result')}</div>
+                    <span
+                      className={`font-bold ${match.isWinner ? 'text-accent' : 'text-destructive'}`}
                     >
-                      {match.isWinner ? "👑" : "💀"}
-                    </div>
-                    <div className="flex-1 grid grid-cols-2 md:grid-cols-5 gap-4">
-                      <div>
-                        <div className="text-xs text-muted-foreground">
-                          Result
-                        </div>
-                        <Badge
-                          className={`font-mono text-xs mt-1 ${
-                            match.isWinner
-                              ? "bg-accent/20 text-accent"
-                              : "bg-destructive/20 text-destructive"
-                          }`}
-                        >
-                          {match.isWinner ? "WIN" : "LOSS"}
-                        </Badge>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">
-                          Your Score
-                        </div>
-                        <div className="text-lg font-bold text-primary font-mono">
-                          {match.score}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">
-                          Opponent
-                        </div>
-                        <div className="text-sm font-bold font-mono truncate">
-                          {match.opponentName}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          Score: {match.opponentScore}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">
-                          Mode
-                        </div>
-                        <Badge
-                          variant="outline"
-                          className="font-mono text-xs mt-1"
-                        >
-                          {match.gameMode.toUpperCase()}
-                        </Badge>
-                      </div>
-                      <div>
-                        <div className="text-xs text-muted-foreground">
-                          Date
-                        </div>
-                        <div className="text-sm font-mono">
-                          {new Date(match.completedAt).toLocaleDateString()}
-                        </div>
-                      </div>
+                      {t(match.isWinner ? 'dash.win' : 'dash.loss')}
+                    </span>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">{t('dash.yourScore')}</div>
+                    <span className="font-bold font-mono text-primary">{match.score}</span>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs text-muted-foreground">{t('dash.opponent')}</div>
+                    <div className="truncate">
+                      {match.opponentName} ({match.opponentScore})
                     </div>
                   </div>
-                ))
-              ) : (
-                <div className="text-center py-12 text-muted-foreground font-mono">
-                  <Activity className="h-12 w-12 mx-auto mb-3 opacity-50" />
-                  <p>No matches played yet</p>
-                  <p className="text-sm mt-2">
-                    Start playing to see your match history!
-                  </p>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Average Stats */}
-        {data.stats.totalMatches > 0 && (
-          <div className="mt-8">
-            <Card className="cyber-border glow-accent">
-              <CardHeader>
-                <CardTitle className="font-mono text-accent">
-                  Performance Summary
-                </CardTitle>
-                <CardDescription className="font-mono">
-                  Your overall statistics
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid md:grid-cols-3 gap-6">
-                  <div className="text-center p-4 rounded-lg bg-primary/5 border border-primary/20">
-                    <div className="text-3xl font-bold text-primary font-mono mb-1">
-                      {data.stats.avgScore}
-                    </div>
-                    <div className="text-sm text-muted-foreground">
-                      Average Score
-                    </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">{t('dash.duration')}</div>
+                    <span className="font-mono">{formatDuration(match.duration)}</span>
                   </div>
-                  <div className="text-center p-4 rounded-lg bg-accent/5 border border-accent/20">
-                    <div className="text-3xl font-bold text-accent font-mono mb-1">
-                      {data.stats.accuracy}%
-                    </div>
-                    <div className="text-sm text-muted-foreground">
-                      Overall Accuracy
-                    </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">{t('dash.date')}</div>
+                    {formatDate(match.completedAt)}
                   </div>
-                  <div className="text-center p-4 rounded-lg bg-secondary/5 border border-secondary/20">
-                    <div className="text-3xl font-bold text-secondary font-mono mb-1">
-                      {data.stats.totalMatches}
-                    </div>
-                    <div className="text-sm text-muted-foreground">
-                      Games Completed
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-      </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState text={t('dash.emptyBody')}>
+              <Button onClick={() => router.push('/')}>{t('dash.startPlaying')}</Button>
+            </EmptyState>
+          )}
+        </Section>
+      </main>
     </div>
-  );
+  )
 }

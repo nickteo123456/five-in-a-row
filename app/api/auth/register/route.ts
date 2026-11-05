@@ -1,53 +1,41 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { hashPassword } from '@/lib/auth';
-import { createUser, findUserByEmail } from '@/lib/database';
+import { NextRequest, NextResponse } from 'next/server'
+import { hashPassword } from '@/lib/auth'
+import { createUser, findUserWithPasswordByEmail } from '@/lib/database'
+import { RATE_LIMITS, enforceRateLimits, getClientIp } from '@/lib/rate-limit'
+import { setSessionCookie } from '@/lib/session'
+import type { Role } from '@/lib/roles'
+import { parseBody, registerSchema } from '@/lib/validation'
+import { logger } from '@/lib/logger'
 
-export const dynamic = 'force-dynamic';
+export const dynamic = 'force-dynamic'
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { email, password, name } = body;
+    const body = await parseBody(request, registerSchema)
+    if (body instanceof NextResponse) return body
 
-    // Validate input
-    if (!email || !password || !name) {
-      return NextResponse.json(
-        { error: 'Email, password, and name are required' },
-        { status: 400 }
-      );
-    }
+    const limited = await enforceRateLimits([
+      { key: `register:${getClientIp(request)}`, rule: RATE_LIMITS.registerIp },
+    ])
+    if (limited) return limited
 
-    if (password.length < 6) {
-      return NextResponse.json(
-        { error: 'Password must be at least 6 characters long' },
-        { status: 400 }
-      );
-    }
+    const { email, password, name } = body
 
     // Check if user already exists
-    const existingUser = await findUserByEmail(email);
+    const existingUser = await findUserWithPasswordByEmail(email)
     if (existingUser) {
-      return NextResponse.json(
-        { error: 'User already exists with this email' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'User already exists with this email' }, { status: 400 })
     }
-
-    // Hash password and determine role
-    const hashedPassword = await hashPassword(password);
-    const role = email === 'iamnick0925@gmail.com' ? 'teacher' : 'student';
 
     // Create user in database
-    const user = await createUser(email, name, hashedPassword, role);
+    const hashedPassword = await hashPassword(password)
+    const user = await createUser(email, name, hashedPassword)
 
     if (!user) {
-      return NextResponse.json(
-        { error: 'Failed to create user' },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: 'Failed to create user' }, { status: 500 })
     }
 
-    return NextResponse.json(
+    const response = NextResponse.json(
       {
         user: {
           id: user.id,
@@ -57,12 +45,12 @@ export async function POST(request: NextRequest) {
         },
       },
       { status: 201 }
-    );
+    )
+    await setSessionCookie(response, { userId: user.id, role: user.role as Role })
+
+    return response
   } catch (error) {
-    console.error('Register error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    logger.error('Register error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

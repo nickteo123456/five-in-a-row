@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 @custom-variant dark (&:is(.dark *));
 
@@ -123,16 +123,9 @@
     position: relative;
     overflow-x: hidden;
 
-    background-image: radial-gradient(
-        circle at 25% 25%,
-        var(--primary) / 0.03 0%,
-        transparent 50%
-      ),
-      radial-gradient(
-        circle at 75% 75%,
-        var(--accent) / 0.03 0%,
-        transparent 50%
-      );
+    background-image:
+      radial-gradient(circle at 25% 25%, var(--primary) / 0.03 0%, transparent 50%),
+      radial-gradient(circle at 75% 75%, var(--accent) / 0.03 0%, transparent 50%);
   }
 }
 
@@ -149,7 +142,7 @@
 
 .floating-symbol {
   position: absolute;
-  font-family: "JetBrains Mono", monospace;
+  font-family: 'JetBrains Mono', monospace;
   font-weight: 900;
   opacity: 0.15;
   pointer-events: none;
@@ -165,8 +158,7 @@
   -webkit-text-stroke-color: oklch(0.7 0.2 200);
   text-stroke-color: oklch(0.7 0.2 200);
   filter: drop-shadow(0 0 10px oklch(0.7 0.2 200 / 0.8))
-    drop-shadow(0 0 20px oklch(0.7 0.2 200 / 0.6))
-    drop-shadow(0 0 30px oklch(0.7 0.2 200 / 0.4))
+    drop-shadow(0 0 20px oklch(0.7 0.2 200 / 0.6)) drop-shadow(0 0 30px oklch(0.7 0.2 200 / 0.4))
     drop-shadow(0 0 40px oklch(0.7 0.2 200 / 0.2));
 }
 
@@ -297,37 +289,46 @@
   }
 
   .hover\:glow-primary:hover {
-    box-shadow: 0 0 15px oklch(0.7 0.2 200 / 0.4),
-      0 0 30px oklch(0.7 0.2 200 / 0.3), 0 0 45px oklch(0.7 0.2 200 / 0.2) !important;
+    box-shadow:
+      0 0 15px oklch(0.7 0.2 200 / 0.4),
+      0 0 30px oklch(0.7 0.2 200 / 0.3),
+      0 0 45px oklch(0.7 0.2 200 / 0.2) !important;
     border-color: oklch(0.7 0.2 200) !important;
   }
 
   .hover\:glow-accent:hover {
-    box-shadow: 0 0 15px oklch(0.75 0.25 160 / 0.4),
-      0 0 30px oklch(0.75 0.25 160 / 0.3), 0 0 45px oklch(0.75 0.25 160 / 0.2) !important;
+    box-shadow:
+      0 0 15px oklch(0.75 0.25 160 / 0.4),
+      0 0 30px oklch(0.75 0.25 160 / 0.3),
+      0 0 45px oklch(0.75 0.25 160 / 0.2) !important;
     border-color: oklch(0.75 0.25 160) !important;
   }
 
   .hover\:glow-secondary:hover {
-    box-shadow: 0 0 15px oklch(0.6 0.15 280 / 0.4),
-      0 0 30px oklch(0.6 0.15 280 / 0.3), 0 0 45px oklch(0.6 0.15 280 / 0.2) !important;
+    box-shadow:
+      0 0 15px oklch(0.6 0.15 280 / 0.4),
+      0 0 30px oklch(0.6 0.15 280 / 0.3),
+      0 0 45px oklch(0.6 0.15 280 / 0.2) !important;
     border-color: oklch(0.6 0.15 280) !important;
   }
 
   .group:hover .group-hover\:glow-primary {
-    box-shadow: 0 0 15px oklch(0.7 0.2 200 / 0.5),
+    box-shadow:
+      0 0 15px oklch(0.7 0.2 200 / 0.5),
       0 0 25px oklch(0.7 0.2 200 / 0.3) !important;
     border-color: oklch(0.7 0.2 200) !important;
   }
 
   .group:hover .group-hover\:glow-accent {
-    box-shadow: 0 0 15px oklch(0.75 0.25 160 / 0.5),
+    box-shadow:
+      0 0 15px oklch(0.75 0.25 160 / 0.5),
       0 0 25px oklch(0.75 0.25 160 / 0.3) !important;
     border-color: oklch(0.75 0.25 160) !important;
   }
 
   .group:hover .group-hover\:glow-secondary {
-    box-shadow: 0 0 15px oklch(0.6 0.15 280 / 0.5),
+    box-shadow:
+      0 0 15px oklch(0.6 0.15 280 / 0.5),
       0 0 25px oklch(0.6 0.15 280 / 0.3) !important;
     border-color: oklch(0.6 0.15 280) !important;
   }
@@ -338,18 +339,12 @@
 
   .cyber-border {
     border: 1px solid oklch(0.2 0.05 240);
-    background: linear-gradient(
-      135deg,
-      oklch(0.12 0.02 240),
-      oklch(0.1 0.02 240)
-    );
+    background: linear-gradient(135deg, oklch(0.12 0.02 240), oklch(0.1 0.02 240));
   }
 
   .cyber-grid {
-    background-image: linear-gradient(
-        oklch(0.2 0.05 240 / 0.1) 1px,
-        transparent 1px
-      ),
+    background-image:
+      linear-gradient(oklch(0.2 0.05 240 / 0.1) 1px, transparent 1px),
       linear-gradient(90deg, oklch(0.2 0.05 240 / 0.1) 1px, transparent 1px);
     background-size: 20px 20px;
   }
@@ -390,12 +385,15 @@
   @keyframes glow-pulse {
     0%,
     100% {
-      box-shadow: 0 0 5px oklch(0.7 0.2 200 / 0.5),
+      box-shadow:
+        0 0 5px oklch(0.7 0.2 200 / 0.5),
         0 0 10px oklch(0.7 0.2 200 / 0.3);
     }
     50% {
-      box-shadow: 0 0 10px oklch(0.7 0.2 200 / 0.7),
-        0 0 20px oklch(0.7 0.2 200 / 0.5), 0 0 30px oklch(0.7 0.2 200 / 0.3);
+      box-shadow:
+        0 0 10px oklch(0.7 0.2 200 / 0.7),
+        0 0 20px oklch(0.7 0.2 200 / 0.5),
+        0 0 30px oklch(0.7 0.2 200 / 0.3);
     }
   }
 
@@ -417,52 +415,57 @@
     border-radius: 0.75rem !important;
     color: oklch(0.95 0 0) !important;
     padding: 1rem !important;
-    box-shadow: 0 0 20px oklch(0.7 0.2 200 / 0.2),
+    box-shadow:
+      0 0 20px oklch(0.7 0.2 200 / 0.2),
       0 0 40px oklch(0.7 0.2 200 / 0.1) !important;
     backdrop-filter: blur(10px) !important;
   }
 
-  [data-sonner-toast][data-type="success"] {
+  [data-sonner-toast][data-type='success'] {
     border-color: oklch(0.75 0.25 160 / 0.5) !important;
     background: oklch(0.12 0.02 240) !important;
-    box-shadow: 0 0 20px oklch(0.75 0.25 160 / 0.3),
+    box-shadow:
+      0 0 20px oklch(0.75 0.25 160 / 0.3),
       0 0 40px oklch(0.75 0.25 160 / 0.15) !important;
   }
 
-  [data-sonner-toast][data-type="success"] [data-icon] {
+  [data-sonner-toast][data-type='success'] [data-icon] {
     color: oklch(0.75 0.25 160) !important;
   }
 
-  [data-sonner-toast][data-type="error"] {
+  [data-sonner-toast][data-type='error'] {
     border-color: oklch(0.65 0.25 20 / 0.5) !important;
     background: oklch(0.12 0.02 240) !important;
-    box-shadow: 0 0 20px oklch(0.65 0.25 20 / 0.3),
+    box-shadow:
+      0 0 20px oklch(0.65 0.25 20 / 0.3),
       0 0 40px oklch(0.65 0.25 20 / 0.15) !important;
   }
 
-  [data-sonner-toast][data-type="error"] [data-icon] {
+  [data-sonner-toast][data-type='error'] [data-icon] {
     color: oklch(0.65 0.25 20) !important;
   }
 
-  [data-sonner-toast][data-type="info"] {
+  [data-sonner-toast][data-type='info'] {
     border-color: oklch(0.7 0.2 200 / 0.5) !important;
     background: oklch(0.12 0.02 240) !important;
-    box-shadow: 0 0 20px oklch(0.7 0.2 200 / 0.3),
+    box-shadow:
+      0 0 20px oklch(0.7 0.2 200 / 0.3),
       0 0 40px oklch(0.7 0.2 200 / 0.15) !important;
   }
 
-  [data-sonner-toast][data-type="info"] [data-icon] {
+  [data-sonner-toast][data-type='info'] [data-icon] {
     color: oklch(0.7 0.2 200) !important;
   }
 
-  [data-sonner-toast][data-type="warning"] {
+  [data-sonner-toast][data-type='warning'] {
     border-color: oklch(0.7 0.15 60 / 0.5) !important;
     background: oklch(0.12 0.02 240) !important;
-    box-shadow: 0 0 20px oklch(0.7 0.15 60 / 0.3),
+    box-shadow:
+      0 0 20px oklch(0.7 0.15 60 / 0.3),
       0 0 40px oklch(0.7 0.15 60 / 0.15) !important;
   }
 
-  [data-sonner-toast][data-type="warning"] [data-icon] {
+  [data-sonner-toast][data-type='warning'] [data-icon] {
     color: oklch(0.7 0.15 60) !important;
   }
 
@@ -499,5 +502,70 @@
     background: oklch(0.3 0.05 240) !important;
     border-color: oklch(0.7 0.2 200 / 0.5) !important;
     color: oklch(0.95 0 0) !important;
+  }
+}
+
+/* Board */
+.board-cell {
+  background: oklch(0.2 0.02 240 / 0.7);
+  border: 1px solid oklch(0.55 0.05 220 / 0.55);
+}
+
+.board-cell[data-playable='true']:hover,
+.board-cell[data-pending='true'] {
+  background: oklch(0.7 0.2 200 / 0.25);
+  border-color: var(--primary);
+}
+
+.board-cell[data-last='true'] {
+  outline: 2px solid oklch(0.9 0.15 95);
+  outline-offset: -2px;
+}
+
+.board-cell[data-winning='true'] {
+  background: oklch(0.85 0.17 95 / 0.35);
+  border-color: oklch(0.9 0.15 95);
+  animation: win-pulse 1s ease-in-out infinite;
+}
+
+@keyframes win-pulse {
+  50% {
+    box-shadow: 0 0 12px oklch(0.9 0.15 95);
+  }
+}
+
+/* Victory burst */
+.win-burst {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 60;
+}
+
+.win-burst span {
+  position: absolute;
+  top: -5%;
+  width: 10px;
+  height: 14px;
+  border-radius: 2px;
+  animation: burst-fall 2.4s ease-in forwards;
+}
+
+@keyframes burst-fall {
+  to {
+    transform: translateY(110vh) rotate(540deg);
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-cell[data-winning='true'],
+  .floating-symbol {
+    animation: none !important;
+  }
+
+  .win-burst {
+    display: none;
   }
 }

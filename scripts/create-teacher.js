@@ -1,70 +1,65 @@
-const bcrypt = require('bcryptjs');
-const { createClient } = require('@supabase/supabase-js');
+// Creates (or updates) the teacher account in Supabase.
+// Usage: npm run create-teacher   (reads .env.local)
+const bcrypt = require('bcryptjs')
+const { createClient } = require('@supabase/supabase-js')
 
-const supabaseUrl = 'https://mgkqekfmsguoqhgjydrt.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1na3Fla2Ztc2d1b3FoZ2p5ZHJ0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyMDA3MDgsImV4cCI6MjA3Njc3NjcwOH0.UzpwZUJpnYrCbv826UpY9oXEmmEnptAzTAsO9rFGu8w';
+const MIN_PASSWORD_LENGTH = 12
 
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-async function createTeacherAccount() {
-  try {
-    console.log('🔐 Creating teacher account...');
-
-    // Hash the password
-    const hashedPassword = await bcrypt.hash('20040925nick', 10);
-    console.log('✅ Password hashed successfully');
-
-    // Check if teacher already exists
-    const { data: existingUser, error: checkError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', 'iamnick0925@gmail.com')
-      .single();
-
-    if (checkError && checkError.code !== 'PGRST116') { // PGRST116 = no rows returned
-      console.error('❌ Error checking existing user:', checkError);
-      return;
-    }
-
-    if (existingUser) {
-      console.log('👨‍🏫 Teacher account already exists!');
-      console.log('📧 Email:', existingUser.email);
-      console.log('👤 Name:', existingUser.name);
-      console.log('🎭 Role:', existingUser.role);
-      return;
-    }
-
-    // Create the teacher account
-    const { data: newUser, error: insertError } = await supabase
-      .from('users')
-      .insert([{
-        email: 'iamnick0925@gmail.com',
-        name: 'Nick',
-        password_hash: hashedPassword,
-        role: 'teacher'
-      }])
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error('❌ Error creating teacher account:', insertError);
-      return;
-    }
-
-    console.log('✅ Teacher account created successfully!');
-    console.log('📧 Email:', newUser.email);
-    console.log('👤 Name:', newUser.name);
-    console.log('🎭 Role:', newUser.role);
-    console.log('🆔 ID:', newUser.id);
-    console.log('📅 Created:', newUser.created_at);
-
-    console.log('\n🎯 Login Credentials:');
-    console.log('Email: iamnick0925@gmail.com');
-    console.log('Password: 20040925nick');
-
-  } catch (error) {
-    console.error('❌ Unexpected error:', error);
+function requireEnv(name) {
+  const value = process.env[name]
+  if (!value) {
+    console.error(`❌ Missing required env var: ${name}`)
+    process.exit(1)
   }
+  return value
 }
 
-createTeacherAccount();
+async function createTeacherAccount() {
+  const supabaseUrl = requireEnv('NEXT_PUBLIC_SUPABASE_URL')
+  const serviceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY')
+  const email = requireEnv('TEACHER_EMAIL').trim().toLowerCase()
+  const password = requireEnv('TEACHER_PASSWORD')
+  const name = process.env.TEACHER_NAME || 'Teacher'
+
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    console.error(`❌ TEACHER_PASSWORD must be at least ${MIN_PASSWORD_LENGTH} characters long`)
+    process.exit(1)
+  }
+
+  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+
+  console.log('🔐 Creating teacher account...')
+  const passwordHash = await bcrypt.hash(password, 10)
+
+  const { data: user, error } = await supabase
+    .from('users')
+    .upsert(
+      {
+        email,
+        name,
+        password_hash: passwordHash,
+        role: 'teacher',
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'email' }
+    )
+    .select('id, email, name, role')
+    .single()
+
+  if (error) {
+    console.error('❌ Error creating teacher account:', error)
+    process.exit(1)
+  }
+
+  console.log('✅ Teacher account is ready')
+  console.log('📧 Email:', user.email)
+  console.log('👤 Name:', user.name)
+  console.log('🎭 Role:', user.role)
+}
+
+createTeacherAccount().catch((error) => {
+  console.error('❌ Unexpected error:', error)
+  process.exit(1)
+})

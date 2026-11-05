@@ -1,60 +1,29 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
-import { findUserByEmail } from '@/lib/database';
-import { isDevMode } from '@/lib/supabase';
+import { NextResponse } from 'next/server'
+import { findUserById } from '@/lib/database'
+import { clearSessionCookie, requireUser } from '@/lib/session'
+import { logger } from '@/lib/logger'
 
-export const dynamic = 'force-dynamic';
+export const dynamic = 'force-dynamic'
 
 export async function GET() {
   try {
-    // In dev mode without Supabase, just return unauthorized
-    // The client will handle authentication state differently
-    if (isDevMode) {
-      return NextResponse.json(
-        { error: 'Not authenticated - using development mode' },
-        { status: 401 }
-      );
-    }
+    const session = await requireUser()
+    if (session instanceof NextResponse) return session
 
-    const cookieStore = cookies();
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            return cookieStore.get(name)?.value;
-          },
-        },
-      }
-    );
+    const user = await findUserById(session.userId)
 
-    const { data: { session } } = await supabase.auth.getSession();
-
-    if (!session) {
-      return NextResponse.json(
-        { error: 'Not authenticated' },
-        { status: 401 }
-      );
-    }
-
-    // Find user in our custom database using the email from Supabase Auth
-    const user = await findUserByEmail(session.user.email!);
-
+    // The account was deleted after this session was issued
     if (!user) {
-      return NextResponse.json(
-        { error: 'User not found' },
-        { status: 404 }
-      );
+      const response = NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+      clearSessionCookie(response)
+      return response
     }
 
-    return NextResponse.json({ user });
+    return NextResponse.json({
+      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    })
   } catch (error) {
-    console.error('Get user error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    logger.error('Get user error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

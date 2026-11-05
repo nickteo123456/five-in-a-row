@@ -1,167 +1,111 @@
-import { NextRequest, NextResponse } from "next/server";
-import { supabase, isDevMode } from "@/lib/supabase";
+import { NextRequest, NextResponse } from 'next/server'
+import { supabaseAdmin, isDevMode } from '@/lib/supabase'
+import { devStore } from '@/lib/dev-store'
+import { requireRole } from '@/lib/session'
+import { parseBody, questionQuerySchema, questionSchema } from '@/lib/validation'
+import { logger } from '@/lib/logger'
 
-export const dynamic = "force-dynamic";
-
-const devQuestions = new Map<string, any>();
+export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const count = searchParams.get("count");
-    const random = searchParams.get("random") === "true";
+    const { searchParams } = new URL(request.url)
+    const query = questionQuerySchema.safeParse(Object.fromEntries(searchParams))
+
+    if (!query.success) {
+      return NextResponse.json({ error: 'Invalid query parameters' }, { status: 400 })
+    }
+
+    const { count } = query.data
+    const random = query.data.random === 'true'
 
     if (isDevMode) {
-      const questions = Array.from(devQuestions.values()).filter(
-        (q) => q.is_active
-      );
+      const questions = Array.from(devStore.questions.values()).filter((q) => q.is_active)
 
       if (random && count) {
-        const shuffled = questions.sort(() => 0.5 - Math.random());
+        const shuffled = questions.sort(() => 0.5 - Math.random())
         return NextResponse.json({
-          questions: shuffled.slice(0, parseInt(count)),
-        });
+          questions: shuffled.slice(0, count),
+        })
       }
 
-      return NextResponse.json({ questions });
+      return NextResponse.json({ questions })
     }
 
-    let query = supabase.from("questions").select("*").eq("is_active", true);
+    const activeQuestions = supabaseAdmin.from('questions').select('*').eq('is_active', true)
 
     if (random && count) {
-      const { data: allQuestions, error } = await query;
+      const { data: allQuestions, error } = await activeQuestions
 
       if (error) {
-        console.error("Error fetching questions:", error);
-        return NextResponse.json(
-          { error: "Failed to fetch questions" },
-          { status: 500 }
-        );
+        logger.error('Error fetching questions:', error)
+        return NextResponse.json({ error: 'Failed to fetch questions' }, { status: 500 })
       }
 
-      const shuffled = (allQuestions || []).sort(() => 0.5 - Math.random());
+      const shuffled = (allQuestions || []).sort(() => 0.5 - Math.random())
       return NextResponse.json({
-        questions: shuffled.slice(0, parseInt(count)),
-      });
+        questions: shuffled.slice(0, count),
+      })
     }
 
-    const { data: questions, error } = await query.order("created_at", {
+    const { data: questions, error } = await activeQuestions.order('created_at', {
       ascending: false,
-    });
+    })
 
     if (error) {
-      console.error("Error fetching questions:", error);
-      return NextResponse.json(
-        { error: "Failed to fetch questions" },
-        { status: 500 }
-      );
+      logger.error('Error fetching questions:', error)
+      return NextResponse.json({ error: 'Failed to fetch questions' }, { status: 500 })
     }
 
-    return NextResponse.json({ questions });
+    return NextResponse.json({ questions })
   } catch (error) {
-    console.error("Error in get questions:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    logger.error('Error in get questions:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const {
-      question,
-      option_a,
-      option_b,
-      option_c,
-      option_d,
-      correct_answer,
-      explanation,
-      difficulty,
-      topic,
-      created_by,
-    } = body;
+    const session = await requireRole('teacher')
+    if (session instanceof NextResponse) return session
 
-    if (
-      !question ||
-      !option_a ||
-      !option_b ||
-      !option_c ||
-      !option_d ||
-      correct_answer === undefined ||
-      !explanation ||
-      !topic
-    ) {
-      return NextResponse.json(
-        { error: "All fields are required" },
-        { status: 400 }
-      );
-    }
+    const body = await parseBody(request, questionSchema)
+    if (body instanceof NextResponse) return body
 
     if (isDevMode) {
       const newQuestion = {
         id: `question-${Date.now()}`,
-        question,
-        option_a,
-        option_b,
-        option_c,
-        option_d,
-        correct_answer,
-        explanation,
-        difficulty: difficulty || "beginner",
-        topic,
-        created_by,
+        ...body,
+        created_by: session.userId,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         is_active: true,
-      };
+      }
 
-      devQuestions.set(newQuestion.id, newQuestion);
+      devStore.questions.set(newQuestion.id, newQuestion)
       return NextResponse.json({
         question: newQuestion,
-        message: "Question created (dev mode)",
-      });
+        message: 'Question created (dev mode)',
+      })
     }
 
-    const { data: newQuestion, error } = await supabase
-      .from("questions")
-      .insert({
-        question,
-        option_a,
-        option_b,
-        option_c,
-        option_d,
-        correct_answer,
-        explanation,
-        difficulty: difficulty || "beginner",
-        topic,
-        created_by,
-      })
+    const { data: newQuestion, error } = await supabaseAdmin
+      .from('questions')
+      .insert({ ...body, created_by: session.userId })
       .select()
-      .single();
+      .single()
 
     if (error) {
-      console.error("Error creating question:", error);
-      return NextResponse.json(
-        { error: "Failed to create question" },
-        { status: 500 }
-      );
+      logger.error('Error creating question:', error)
+      return NextResponse.json({ error: 'Failed to create question' }, { status: 500 })
     }
 
     return NextResponse.json({
       question: newQuestion,
-      message: "Question created successfully",
-    });
+      message: 'Question created successfully',
+    })
   } catch (error) {
-    console.error("Error in create question:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    logger.error('Error in create question:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-}
-
-export function getDevQuestions() {
-  return devQuestions;
 }

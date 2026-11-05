@@ -1,125 +1,123 @@
-import { supabase, isDevMode } from './supabase';
-import { findDevUserByEmail, createDevUser, getAllDevUsers, deleteDevUser } from './dev-users';
+import { supabaseAdmin, isDevMode } from './supabase'
+import { findDevUserByEmail, findDevUserById, createDevUser } from './dev-users'
+import { logger } from './logger'
 
 export interface User {
-  id: string;
-  email: string;
-  name: string;
-  role: string;
-  created_at: string;
-  updated_at: string;
+  id: string
+  email: string
+  name: string
+  role: string
+  created_at: string
+  updated_at: string
 }
 
-export async function createUser(email: string, name: string, passwordHash: string, role: string = 'student'): Promise<User | null> {
+export interface UserWithPassword extends User {
+  password_hash: string
+}
+
+const PUBLIC_USER_COLUMNS = 'id, email, name, role, created_at, updated_at'
+
+function toPublicUser({ id, email, name, role, created_at, updated_at }: User): User {
+  return { id, email, name, role, created_at, updated_at }
+}
+
+export async function createUser(
+  email: string,
+  name: string,
+  passwordHash: string
+): Promise<User | null> {
   // Use in-memory dev users if Supabase is not configured
   if (isDevMode) {
-    console.log('🔧 Development mode: Creating user in memory');
-    return createDevUser(email, name, passwordHash, role);
+    return toPublicUser(createDevUser(email, name, passwordHash))
   }
 
   try {
-    const { data, error } = await supabase
+    // Registration only ever creates students. The teacher account comes from
+    // `npm run create-teacher`.
+    const { data, error } = await supabaseAdmin
       .from('users')
-      .insert([{
-        email,
-        name,
-        password_hash: passwordHash,
-        role
-      }])
-      .select()
-      .single();
+      .insert([
+        {
+          email,
+          name,
+          password_hash: passwordHash,
+          role: 'student',
+        },
+      ])
+      .select(PUBLIC_USER_COLUMNS)
+      .single()
 
     if (error) {
       // If table doesn't exist, return null instead of error
-      if (error.code === '42P01') { // Table doesn't exist
-        console.log('Users table does not exist yet');
-        return null;
+      if (error.code === '42P01') {
+        // Table doesn't exist
+        return null
       }
-      console.error('Error creating user:', error);
-      return null;
+      logger.error('Error creating user:', error)
+      return null
     }
 
-    return data;
+    return data
   } catch (error) {
-    console.error('Database error:', error);
-    return null;
+    logger.error('Database error:', error)
+    return null
   }
 }
 
-export async function findUserByEmail(email: string): Promise<User | null> {
+// Includes the password hash, so the result must never be sent to a client.
+export async function findUserWithPasswordByEmail(email: string): Promise<UserWithPassword | null> {
   // Use in-memory dev users if Supabase is not configured
   if (isDevMode) {
-    return findDevUserByEmail(email);
+    return findDevUserByEmail(email)
   }
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('users')
-      .select('*')
+      .select(`${PUBLIC_USER_COLUMNS}, password_hash`)
       .eq('email', email)
-      .single();
+      .single()
 
-    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+    if (error && error.code !== 'PGRST116') {
+      // PGRST116 = no rows returned
       // If table doesn't exist, return null instead of error
-      if (error.code === '42P01') { // Table doesn't exist
-        console.log('Users table does not exist yet');
-        return null;
+      if (error.code === '42P01') {
+        // Table doesn't exist
+        return null
       }
-      console.error('Error finding user:', error);
-      return null;
+      logger.error('Error finding user:', error)
+      return null
     }
 
-    return data || null;
+    return data || null
   } catch (error) {
-    console.error('Database error:', error);
-    return null;
+    logger.error('Database error:', error)
+    return null
   }
 }
 
-export async function getAllUsers(): Promise<User[]> {
+export async function findUserById(id: string): Promise<User | null> {
   // Use in-memory dev users if Supabase is not configured
   if (isDevMode) {
-    return getAllDevUsers();
+    const user = findDevUserById(id)
+    return user ? toPublicUser(user) : null
   }
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('users')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .select(PUBLIC_USER_COLUMNS)
+      .eq('id', id)
+      .maybeSingle()
 
     if (error) {
-      console.error('Error getting users:', error);
-      return [];
+      logger.error('Error finding user:', error)
+      return null
     }
 
-    return data || [];
+    return data
   } catch (error) {
-    console.error('Database error:', error);
-    return [];
-  }
-}
-
-export async function deleteUser(userId: string): Promise<boolean> {
-  // Use in-memory dev users if Supabase is not configured
-  if (isDevMode) {
-    return deleteDevUser(userId);
-  }
-
-  try {
-    const { error } = await supabase
-      .from('users')
-      .delete()
-      .eq('id', userId);
-
-    if (error) {
-      console.error('Error deleting user:', error);
-      return false;
-    }
-
-    return true;
-  } catch (error) {
-    console.error('Database error:', error);
-    return false;
+    logger.error('Database error:', error)
+    return null
   }
 }
